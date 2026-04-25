@@ -481,7 +481,11 @@ async function init() {
       audio: false
     });
     video.srcObject = stream;
-    await video.play();
+    video.play().catch(() => {});
+    await new Promise(resolve => {
+      if (video.readyState >= 2) { resolve(); return; }
+      video.addEventListener('canplay', resolve, { once: true });
+    });
     loadingEl.style.display = 'none';
     if (animId) cancelAnimationFrame(animId);
     loop();
