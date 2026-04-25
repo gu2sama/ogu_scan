@@ -864,15 +864,18 @@ function detectDocEdges(data, w, h) {
 }
 
 // ============================================================
-// Document detection (hybrid: edge-first → brightness fallback)
+// Document detection (hybrid: brightness-first → edge fallback)
 // ============================================================
 function detectDocument(data, w, h) {
-  // Primary: edge-based (handles white-on-white, shadows, low contrast)
+  // Primary: brightness-based (stable for white/light paper on darker surfaces)
+  const brightResult = detectDocBrightness(data, w, h);
+  if (brightResult.detected) return brightResult;
+
+  // Fallback: edge-based (handles white-on-white, transparent docs, low contrast)
   const edgeQ = detectDocEdges(data, w, h);
   if (edgeQ) return { detected: true, corners: edgeQ };
 
-  // Fallback: brightness-based
-  return detectDocBrightness(data, w, h);
+  return { detected: false };
 }
 
 function detectDocBrightness(data, w, h) {
