@@ -1756,6 +1756,7 @@ function closeConfirmSheet() {
 
 async function doShare() {
   closeConfirmSheet();
+  autoCaptureEnabled = false;  // keep suppressed while share sheet is open
   saveBtn.disabled = true;
   showToast('PDF 生成中...');
 
@@ -1814,6 +1815,7 @@ async function doShare() {
   }
 
   saveBtn.disabled = false;
+  autoCaptureEnabled = true;
 }
 
 function fallbackDownload(blob, name) {
