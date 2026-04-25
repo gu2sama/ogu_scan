@@ -433,7 +433,7 @@
 
 <div id="toast"></div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 <script>
 // Global error display for debugging
 window.onerror = function(msg, src, line) {
@@ -690,6 +690,7 @@ function detectDocument(data, w, h) {
 
   const corners = findCorners(edges, w, h, minX, maxX, minY, maxY);
   return { detected: true, corners };
+}
 
 // Find 4 document corners using extreme-point scoring
 // with outlier filtering based on distance from centroid
