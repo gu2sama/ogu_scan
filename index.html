@@ -1319,10 +1319,8 @@ async function captureDocument(corners, pw, ph, vw, vh) {
       scaledCorners = cvScaled;
   }
 
-  const [tl, tr, br, bl] = scaledCorners;
-  const outW = Math.round(Math.max(dist(tl, tr), dist(bl, br)));
-  const outH = Math.round(Math.max(dist(tl, bl), dist(tr, br)));
-  const dst  = [[0,0],[outW,0],[outW,outH],[0,outH]];
+  const { outW, outH } = computeOutputSize(scaledCorners, capW, capH);
+  const dst = [[0,0],[outW,0],[outW,outH],[0,outH]];
 
   const H = computeHomography(scaledCorners, dst);
   const warped = warpPerspective(srcCanvas, H, outW, outH);
@@ -1359,9 +1357,7 @@ async function manualCapture() {
       if (isValidQuad(cvScaled, capW, capH) && quadArea(cvScaled) > quadArea(scaledCorners) * 1.05)
         scaledCorners = cvScaled;
     }
-    const [tl, tr, br, bl] = scaledCorners;
-    const outW = Math.round(Math.max(dist(tl, tr), dist(bl, br)));
-    const outH = Math.round(Math.max(dist(tl, bl), dist(tr, br)));
+    const { outW, outH } = computeOutputSize(scaledCorners, capW, capH);
     const H = computeHomography(scaledCorners, [[0,0],[outW,0],[outW,outH],[0,outH]]);
     const warped = warpPerspective(srcCanvas, H, outW, outH);
     addPage(applyFilter(warped, currentFilter), warped, { canvas: srcCanvas, corners: scaledCorners }, currentFilter);
@@ -2126,6 +2122,70 @@ function showToast(msg) {
 // ============================================================
 // Utils
 // ============================================================
+
+// Compute correct output dimensions for a perspectively-distorted rectangle.
+// Uses vanishing-point self-calibration (VP orthogonality → focal length),
+// then computes angular arc lengths on the unit sphere to recover true aspect ratio.
+function computeOutputSize(corners, imgW, imgH) {
+  const [tl, tr, br, bl] = corners;
+  const cx = imgW / 2, cy = imgH / 2;
+
+  // 3-vector cross product
+  const cross3 = ([ax,ay,aw], [bx,by,bw]) => [
+    ay*bw - aw*by, aw*bx - ax*bw, ax*by - ay*bx
+  ];
+
+  // Centered homogeneous coords
+  const A = [tl[0]-cx, tl[1]-cy, 1];  // TL
+  const B = [tr[0]-cx, tr[1]-cy, 1];  // TR
+  const C = [br[0]-cx, br[1]-cy, 1];  // BR
+  const D = [bl[0]-cx, bl[1]-cy, 1];  // BL
+
+  // Vanishing point of horizontal edges (top ∩ bottom)
+  const vp_h = cross3(cross3(A, B), cross3(D, C));
+  // Vanishing point of vertical edges (left ∩ right)
+  const vp_v = cross3(cross3(A, D), cross3(B, C));
+
+  // Estimate focal length from VP orthogonality: vp1·ω·vp2 = 0
+  // ω = diag(1/f², 1/f², 1)  →  f² = -(vp1x·vp2x + vp1y·vp2y)
+  let f = Math.max(imgW, imgH) * 1.2;  // safe default
+  const [v1x, v1y, v1w] = vp_h;
+  const [v2x, v2y, v2w] = vp_v;
+  if (Math.abs(v1w) > 1e-8 && Math.abs(v2w) > 1e-8) {
+    const f2 = -(v1x/v1w * v2x/v2w + v1y/v1w * v2y/v2w);
+    if (f2 > 0) f = Math.sqrt(f2);
+  }
+
+  // Unit-sphere rays through each corner
+  const ray = ([x, y]) => { const n = Math.sqrt(x*x + y*y + f*f); return [x/n, y/n, f/n]; };
+  const rA = ray([A[0], A[1]]);
+  const rB = ray([B[0], B[1]]);
+  const rC = ray([C[0], C[1]]);
+  const rD = ray([D[0], D[1]]);
+
+  // Sin of angle between unit rays ≈ arc length (true physical measure)
+  const sinAng = (r1, r2) => {
+    const ex = r1[1]*r2[2]-r1[2]*r2[1];
+    const ey = r1[2]*r2[0]-r1[0]*r2[2];
+    const ez = r1[0]*r2[1]-r1[1]*r2[0];
+    return Math.sqrt(ex*ex + ey*ey + ez*ez);
+  };
+
+  const angW = (sinAng(rA, rB) + sinAng(rD, rC)) / 2;  // avg horizontal angle
+  const angH = (sinAng(rA, rD) + sinAng(rB, rC)) / 2;  // avg vertical angle
+
+  // Fallback to pixel distances if degenerate
+  const pixW = Math.max(dist(tl, tr), dist(bl, br));
+  const pixH = Math.max(dist(tl, bl), dist(tr, br));
+  if (angW < 1e-6 || angH < 1e-6) return { outW: Math.round(pixW), outH: Math.round(pixH) };
+
+  const ar = angH / angW;
+  // Sanity clamp (0.25 ~ 4.0 covers A4, postcards, etc.)
+  if (ar < 0.25 || ar > 4.0) return { outW: Math.round(pixW), outH: Math.round(pixH) };
+
+  return { outW: Math.round(pixW), outH: Math.round(pixW * ar) };
+}
+
 function dist([x1,y1], [x2,y2]) {
   return Math.sqrt((x2-x1)**2 + (y2-y1)**2);
 }
@@ -2367,9 +2427,7 @@ function _commitAdjust() {
   const src = pageSrcs[editIndex];
   if (!src) return;
   const newCorners = editHandles.map(([x, y]) => [x / _edScale + _edOffX, y / _edScale + _edOffY]);
-  const [tl, tr, br, bl] = newCorners;
-  const outW = Math.round(Math.max(dist(tl, tr), dist(bl, br)));
-  const outH = Math.round(Math.max(dist(tl, bl), dist(tr, br)));
+  const { outW, outH } = computeOutputSize(newCorners, src.canvas.width, src.canvas.height);
   if (outW < 10 || outH < 10) return;
   const H      = computeHomography(newCorners, [[0,0],[outW,0],[outW,outH],[0,outH]]);
   const warped = warpPerspective(src.canvas, H, outW, outH);
