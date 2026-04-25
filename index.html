@@ -410,7 +410,7 @@
         <circle id="countdown-ring"  cx="26" cy="26" r="21"/>
       </svg>
     </div>
-    <div id="filter-label">オリジナル</div>
+    <div id="filter-label">文書強調</div>
     <div id="flash"></div>
     <div id="permission-error">
       <p style="font-size:32px">📷</p>
@@ -422,7 +422,7 @@
   <div id="bottom-bar">
     <div id="thumb-strip"></div>
     <div id="controls">
-      <button id="filter-btn" onclick="cycleFilter()">AUTO</button>
+      <button id="filter-btn" onclick="cycleFilter()">DOC</button>
       <button id="shutter" onclick="manualCapture()"></button>
       <button id="share-btn" onclick="generateAndShare()" disabled>↑</button>
     </div>
@@ -446,13 +446,13 @@ window.onerror = function(msg, src, line) {
 // ============================================================
 const STABLE_MOVE_MAX  = 12;   // px (in process space)
 const PROCESS_W        = 640;  // processing resolution width
-const CAPTURE_MAX_W    = 1100; // max width for warp canvas
+const CAPTURE_MAX_W    = 2000; // max width for warp canvas
 const DETECT_W         = 80;   // detection resolution
 const STABLE_THRESHOLD = 30;   // ~1 second at 30fps
 const CAPTURE_COOLDOWN = 2500; // ms between auto-captures
 const FILTERS = ['original', 'enhance', 'bw'];
 const FILTER_LABEL = { original: 'オリジナル', enhance: '文書強調', bw: '白黒' };
-const FILTER_BTN_TEXT = { original: 'AUTO', enhance: 'DOC', bw: 'B&W' };
+const FILTER_BTN_TEXT = { original: 'RAW', enhance: 'DOC', bw: 'B&W' };
 
 // ============================================================
 // State
@@ -465,7 +465,7 @@ let lastCorners     = null;
 let smoothedCorners = null;
 let isCapturing      = false;
 let lastCaptureTime  = 0;
-let currentFilter = 'original';
+let currentFilter = 'enhance';
 let toastTimer;
 
 // ============================================================
@@ -505,8 +505,9 @@ async function startCamera() {
     stream = await navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: { ideal: 'environment' },
-        width:  { ideal: 1920 },
-        height: { ideal: 1080 }
+        width:  { ideal: 3840 },
+        height: { ideal: 2160 },
+        focusMode: { ideal: 'continuous' }
       },
       audio: false
     });
@@ -649,9 +650,227 @@ function processToDisplay(px, py, pw, ph, vw, vh, dw, dh) {
 }
 
 // ============================================================
-// Document detection
+// Edge-based Document Detection (Canny → Hough → Quad fitting)
+// Runs on the 80px detection canvas — pure JS, zero deps
+// ============================================================
+
+function cannyEdges(rgba, w, h) {
+  // 1. Grayscale
+  const g = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++)
+    g[i] = (rgba[i*4]*77 + rgba[i*4+1]*150 + rgba[i*4+2]*29) >> 8;
+
+  // 2. 3×3 box blur (noise reduction)
+  const b = new Float32Array(w * h);
+  for (let y = 1; y < h-1; y++)
+    for (let x = 1; x < w-1; x++) {
+      let s = 0;
+      for (let dy = -1; dy <= 1; dy++)
+        for (let dx = -1; dx <= 1; dx++)
+          s += g[(y+dy)*w+x+dx];
+      b[y*w+x] = s / 9;
+    }
+  for (let x = 0; x < w; x++) { b[x] = g[x]; b[(h-1)*w+x] = g[(h-1)*w+x]; }
+  for (let y = 0; y < h; y++) { b[y*w] = g[y*w]; b[y*w+w-1] = g[y*w+w-1]; }
+
+  // 3. Sobel gradients
+  const mag = new Float32Array(w * h);
+  const dir = new Float32Array(w * h);
+  for (let y = 1; y < h-1; y++)
+    for (let x = 1; x < w-1; x++) {
+      const i = y*w+x;
+      const gx = -b[(y-1)*w+x-1] - 2*b[y*w+x-1] - b[(y+1)*w+x-1]
+                 + b[(y-1)*w+x+1] + 2*b[y*w+x+1] + b[(y+1)*w+x+1];
+      const gy = -b[(y-1)*w+x-1] - 2*b[(y-1)*w+x] - b[(y-1)*w+x+1]
+                 + b[(y+1)*w+x-1] + 2*b[(y+1)*w+x] + b[(y+1)*w+x+1];
+      mag[i] = Math.sqrt(gx*gx + gy*gy);
+      dir[i] = Math.atan2(gy, gx);
+    }
+
+  // 4. Non-maximum suppression (thin edges to 1px)
+  const nms = new Float32Array(w * h);
+  for (let y = 1; y < h-1; y++)
+    for (let x = 1; x < w-1; x++) {
+      const i = y*w+x;
+      const a = ((dir[i] * 180 / Math.PI) + 180) % 180;
+      let n1, n2;
+      if      (a < 22.5 || a >= 157.5) { n1 = mag[y*w+x-1];     n2 = mag[y*w+x+1]; }
+      else if (a < 67.5)               { n1 = mag[(y-1)*w+x+1]; n2 = mag[(y+1)*w+x-1]; }
+      else if (a < 112.5)              { n1 = mag[(y-1)*w+x];   n2 = mag[(y+1)*w+x]; }
+      else                             { n1 = mag[(y-1)*w+x-1]; n2 = mag[(y+1)*w+x+1]; }
+      nms[i] = (mag[i] >= n1 && mag[i] >= n2) ? mag[i] : 0;
+    }
+
+  // 5. Auto-thresholds from gradient distribution
+  let maxMag = 0;
+  for (let i = 0; i < nms.length; i++) if (nms[i] > maxMag) maxMag = nms[i];
+  if (maxMag < 1) return new Uint8Array(w * h);
+  const hi = maxMag * 0.18;
+  const lo = hi * 0.4;
+
+  // 6. Hysteresis (strong edges propagate to connected weak edges)
+  const edges = new Uint8Array(w * h);
+  for (let i = 0; i < nms.length; i++) {
+    if (nms[i] >= hi) edges[i] = 2;
+    else if (nms[i] >= lo) edges[i] = 1;
+  }
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let y = 1; y < h-1; y++)
+      for (let x = 1; x < w-1; x++) {
+        if (edges[y*w+x] !== 1) continue;
+        for (let dy = -1; dy <= 1; dy++)
+          for (let dx = -1; dx <= 1; dx++)
+            if (edges[(y+dy)*w+x+dx] === 2) { edges[y*w+x] = 2; changed = true; }
+      }
+  }
+  for (let i = 0; i < edges.length; i++) edges[i] = edges[i] === 2 ? 1 : 0;
+  return edges;
+}
+
+function houghTransform(edges, w, h, minVotes) {
+  const diag = Math.ceil(Math.sqrt(w*w + h*h));
+  const T = 180;
+  const cosT = new Float32Array(T);
+  const sinT = new Float32Array(T);
+  for (let t = 0; t < T; t++) {
+    const a = t * Math.PI / T;
+    cosT[t] = Math.cos(a); sinT[t] = Math.sin(a);
+  }
+
+  const acc = new Int32Array(2 * diag * T);
+  let edgeCnt = 0;
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      if (!edges[y*w+x]) continue;
+      edgeCnt++;
+      for (let t = 0; t < T; t++)
+        acc[(Math.round(x*cosT[t] + y*sinT[t]) + diag) * T + t]++;
+    }
+  if (edgeCnt < 8) return [];
+
+  // Extract local maxima from accumulator
+  const lines = [];
+  const nr = 4;
+  for (let r = 0; r < 2*diag; r++)
+    for (let t = 0; t < T; t++) {
+      const v = acc[r*T+t];
+      if (v < minVotes) continue;
+      let best = true;
+      for (let dr = -nr; dr <= nr && best; dr++)
+        for (let dt = -nr; dt <= nr && best; dt++) {
+          if (!dr && !dt) continue;
+          const r2 = r+dr, t2 = (t+dt+T)%T;
+          if (r2 >= 0 && r2 < 2*diag && acc[r2*T+t2] > v) best = false;
+        }
+      if (best) lines.push({ rho: r-diag, theta: t*Math.PI/T, votes: v });
+    }
+  lines.sort((a, b) => b.votes - a.votes);
+  return lines;
+}
+
+function houghLineIntersect(l1, l2) {
+  const c1 = Math.cos(l1.theta), s1 = Math.sin(l1.theta);
+  const c2 = Math.cos(l2.theta), s2 = Math.sin(l2.theta);
+  const d = c1*s2 - c2*s1;
+  if (Math.abs(d) < 1e-6) return null;
+  return [(l1.rho*s2 - l2.rho*s1)/d, (l2.rho*c1 - l1.rho*c2)/d];
+}
+
+function orderQuadCorners(pts) {
+  const top = [...pts].sort((a,b) => a[1]-b[1]).slice(0,2).sort((a,b) => a[0]-b[0]);
+  const bot = [...pts].sort((a,b) => a[1]-b[1]).slice(2).sort((a,b) => a[0]-b[0]);
+  return [top[0], top[1], bot[1], bot[0]]; // TL TR BR BL
+}
+
+function findDocQuadFromLines(lines, w, h) {
+  if (lines.length < 4) return null;
+  const cands = lines.slice(0, 20);
+
+  // Cluster lines by angle (merge within 15°)
+  const clusters = [];
+  const used = new Array(cands.length).fill(false);
+  for (let i = 0; i < cands.length; i++) {
+    if (used[i]) continue;
+    const grp = [cands[i]]; used[i] = true;
+    for (let j = i+1; j < cands.length; j++) {
+      if (used[j]) continue;
+      let dt = Math.abs(cands[j].theta - cands[i].theta);
+      if (dt > Math.PI/2) dt = Math.PI - dt;
+      if (dt < Math.PI/12) { grp.push(cands[j]); used[j] = true; }
+    }
+    grp.sort((a, b) => a.rho - b.rho);
+    clusters.push({
+      theta: grp.reduce((s,l) => s + l.theta, 0) / grp.length,
+      lines: grp,
+      votes: grp.reduce((s,l) => s + l.votes, 0)
+    });
+  }
+  clusters.sort((a, b) => b.votes - a.votes);
+
+  const minSep = Math.min(w, h) * 0.12;
+  const margin = Math.max(w, h) * 0.15;
+
+  // Find two non-parallel clusters whose intersection forms a valid quad
+  for (let ci = 0; ci < clusters.length - 1; ci++) {
+    for (let cj = ci + 1; cj < clusters.length; cj++) {
+      let ad = Math.abs(clusters[ci].theta - clusters[cj].theta);
+      if (ad > Math.PI/2) ad = Math.PI - ad;
+      if (ad < Math.PI/5) continue; // need ≥36° between groups
+
+      if (clusters[ci].lines.length < 2 || clusters[cj].lines.length < 2) continue;
+
+      const g1 = clusters[ci].lines.slice(0, 4);
+      const g2 = clusters[cj].lines.slice(0, 4);
+      let bestQ = null, bestS = -1;
+
+      for (let a = 0; a < g1.length-1; a++)
+        for (let b = a+1; b < g1.length; b++) {
+          if (Math.abs(g1[a].rho - g1[b].rho) < minSep) continue;
+          for (let c = 0; c < g2.length-1; c++)
+            for (let d = c+1; d < g2.length; d++) {
+              if (Math.abs(g2[c].rho - g2[d].rho) < minSep) continue;
+              const p1 = houghLineIntersect(g1[a], g2[c]);
+              const p2 = houghLineIntersect(g1[a], g2[d]);
+              const p3 = houghLineIntersect(g1[b], g2[c]);
+              const p4 = houghLineIntersect(g1[b], g2[d]);
+              if (!p1 || !p2 || !p3 || !p4) continue;
+              if ([p1,p2,p3,p4].some(([x,y]) =>
+                x < -margin || x > w+margin || y < -margin || y > h+margin)) continue;
+              const q = orderQuadCorners([p1, p2, p3, p4]);
+              if (isValidQuad(q, w, h)) {
+                const sc = g1[a].votes + g1[b].votes + g2[c].votes + g2[d].votes;
+                if (sc > bestS) { bestS = sc; bestQ = q; }
+              }
+            }
+        }
+      if (bestQ) return bestQ;
+    }
+  }
+  return null;
+}
+
+function detectDocEdges(data, w, h) {
+  const edges = cannyEdges(data, w, h);
+  const minV = Math.max(3, Math.round(Math.min(w, h) * 0.08));
+  const lines = houghTransform(edges, w, h, minV);
+  return findDocQuadFromLines(lines, w, h);
+}
+
+// ============================================================
+// Document detection (hybrid: edge-first → brightness fallback)
 // ============================================================
 function detectDocument(data, w, h) {
+  // Primary: edge-based (handles white-on-white, shadows, low contrast)
+  const edgeQ = detectDocEdges(data, w, h);
+  if (edgeQ) return { detected: true, corners: edgeQ };
+
+  // Fallback: brightness-based
+  return detectDocBrightness(data, w, h);
+}
+
+function detectDocBrightness(data, w, h) {
   // Adaptive threshold: mean brightness + 50 (ignores room/background brightness)
   let lumSum = 0;
   for (let i = 0; i < w * h; i++) {
@@ -917,29 +1136,144 @@ function applyMat3([[a,b,c],[d,e,f],[g,h,k]], x, y) {
 }
 
 // ============================================================
+// Image Enhancement Pipeline
+// ============================================================
+
+// Estimate document background via downscale → box-blur → upscale.
+// Works on all browsers (no ctx.filter dependency).
+function estimateBackground(canvas) {
+  const scale = 10;
+  const sw = Math.ceil(canvas.width / scale);
+  const sh = Math.ceil(canvas.height / scale);
+
+  // Downscale — averaging acts as initial low-pass
+  const small = document.createElement('canvas');
+  small.width = sw; small.height = sh;
+  const sctx = small.getContext('2d');
+  sctx.drawImage(canvas, 0, 0, sw, sh);
+
+  // Box-blur on tiny image (very fast at this size)
+  const imgData = sctx.getImageData(0, 0, sw, sh);
+  boxBlurRGBA(imgData, sw, sh, 3);
+  boxBlurRGBA(imgData, sw, sh, 3); // 2nd pass for smoother result
+  sctx.putImageData(imgData, 0, 0);
+
+  // Upscale back — bilinear interpolation smooths further
+  const bg = document.createElement('canvas');
+  bg.width = canvas.width; bg.height = canvas.height;
+  const bgCtx = bg.getContext('2d');
+  bgCtx.imageSmoothingEnabled = true;
+  bgCtx.drawImage(small, 0, 0, canvas.width, canvas.height);
+  return bg;
+}
+
+// Separable box blur (H + V) using running sums — O(1) per pixel
+function boxBlurRGBA(imgData, w, h, r) {
+  const d = imgData.data;
+  const tmp = new Uint8ClampedArray(d.length);
+
+  // Horizontal
+  for (let y = 0; y < h; y++) {
+    for (let c = 0; c < 3; c++) {
+      let sum = 0, cnt = 0;
+      for (let x = 0; x <= r && x < w; x++) { sum += d[(y*w+x)*4+c]; cnt++; }
+      for (let x = 0; x < w; x++) {
+        tmp[(y*w+x)*4+c] = (sum / cnt) | 0;
+        tmp[(y*w+x)*4+3] = 255;
+        if (x + r + 1 < w) { sum += d[(y*w+x+r+1)*4+c]; cnt++; }
+        if (x - r >= 0)    { sum -= d[(y*w+x-r)*4+c];   cnt--; }
+      }
+    }
+  }
+  // Vertical
+  for (let x = 0; x < w; x++) {
+    for (let c = 0; c < 3; c++) {
+      let sum = 0, cnt = 0;
+      for (let y = 0; y <= r && y < h; y++) { sum += tmp[(y*w+x)*4+c]; cnt++; }
+      for (let y = 0; y < h; y++) {
+        d[(y*w+x)*4+c] = (sum / cnt) | 0;
+        d[(y*w+x)*4+3] = 255;
+        if (y + r + 1 < h) { sum += tmp[((y+r+1)*w+x)*4+c]; cnt++; }
+        if (y - r >= 0)    { sum -= tmp[((y-r)*w+x)*4+c];   cnt--; }
+      }
+    }
+  }
+}
+
+// Sharpen via 3×3 Laplacian: out = center + amount × (4·center − neighbors)
+function sharpenCanvas(canvas, amount) {
+  const w = canvas.width, h = canvas.height;
+  if (w < 4 || h < 4) return canvas;
+
+  const out = document.createElement('canvas');
+  out.width = w; out.height = h;
+  const ctx = out.getContext('2d');
+  ctx.drawImage(canvas, 0, 0);
+
+  const src = ctx.getImageData(0, 0, w, h);
+  const dst = ctx.createImageData(w, h);
+  const s = src.data, od = dst.data;
+  od.set(s); // copy all (handles border pixels)
+
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = (y * w + x) * 4;
+      for (let c = 0; c < 3; c++) {
+        const v = s[i + c];
+        const lap = 4 * v
+          - s[((y-1)*w+x)*4+c]
+          - s[((y+1)*w+x)*4+c]
+          - s[(y*w+x-1)*4+c]
+          - s[(y*w+x+1)*4+c];
+        od[i + c] = Math.min(255, Math.max(0, v + amount * lap));
+      }
+    }
+  }
+  ctx.putImageData(dst, 0, 0);
+  return out;
+}
+
+// ============================================================
 // Filters
 // ============================================================
 function applyFilter(canvas, filter) {
   if (filter === 'original') return canvas;
+
+  const w = canvas.width, h = canvas.height;
+
+  // Background estimation for lighting normalization
+  const bgCanvas = estimateBackground(canvas);
+
   const out = document.createElement('canvas');
-  out.width  = canvas.width;
-  out.height = canvas.height;
-  const c = out.getContext('2d');
-  c.drawImage(canvas, 0, 0);
-  const img = c.getImageData(0, 0, out.width, out.height);
-  const d = img.data;
-  for (let i = 0; i < d.length; i += 4) {
-    const lum = (d[i]*77 + d[i+1]*150 + d[i+2]*29) >> 8;
-    let v;
+  out.width = w; out.height = h;
+  const ctx = out.getContext('2d');
+  ctx.drawImage(canvas, 0, 0);
+  const srcImg = ctx.getImageData(0, 0, w, h);
+  const bgImg  = bgCanvas.getContext('2d').getImageData(0, 0, w, h);
+  const s = srcImg.data, bg = bgImg.data;
+
+  for (let i = 0; i < s.length; i += 4) {
+    const lum   = (s[i]*77 + s[i+1]*150 + s[i+2]*29) >> 8;
+    const bgLum = Math.max(1, (bg[i]*77 + bg[i+1]*150 + bg[i+2]*29) >> 8);
+
+    // Background division — removes uneven lighting & shadows
+    const n = Math.min(255, (lum / bgLum) * 240);
+
     if (filter === 'enhance') {
-      v = lum > 155 ? Math.min(255, lum * 1.25 | 0) : Math.max(0, lum * 0.55 | 0);
+      // Contrast S-curve: paper→white, ink→solid dark
+      let t = n / 255;
+      t = Math.min(1, Math.max(0, 0.5 + (t - 0.5) * 2.2));
+      t = Math.pow(t, 0.6); // gamma lift → pushes paper to clean white
+      s[i] = s[i+1] = s[i+2] = (t * 255 + 0.5) | 0;
     } else {
-      v = lum > 145 ? 255 : 0;
+      // B&W binary threshold (also benefits from background normalization)
+      s[i] = s[i+1] = s[i+2] = n > 155 ? 255 : 0;
     }
-    d[i] = d[i+1] = d[i+2] = v;
   }
-  c.putImageData(img, 0, 0);
-  return out;
+  ctx.putImageData(srcImg, 0, 0);
+
+  // Sharpen enhance result for crisp text edges
+  return filter === 'enhance' ? sharpenCanvas(out, 0.55) : out;
 }
 
 // ============================================================
@@ -1016,7 +1350,17 @@ async function generateAndShare() {
     doc.addImage(img, 'JPEG', 0, 0, w, h);
   }
 
-  const fileName = `scan_${pages.length}pages.pdf`;
+  const now = new Date();
+  const ts = [
+    now.getFullYear(),
+    String(now.getMonth()+1).padStart(2,'0'),
+    String(now.getDate()).padStart(2,'0'),
+    '_',
+    String(now.getHours()).padStart(2,'0'),
+    String(now.getMinutes()).padStart(2,'0'),
+    String(now.getSeconds()).padStart(2,'0')
+  ].join('');
+  const fileName = `scan_${ts}_${pages.length}p.pdf`;
   const blob = doc.output('blob');
   const file = new File([blob], fileName, { type: 'application/pdf' });
 
