@@ -159,18 +159,6 @@
       transition: stroke-dashoffset 0.05s linear;
     }
 
-    /* Filter label */
-    #filter-label {
-      position: absolute;
-      bottom: 16px;
-      right: 16px;
-      font-size: 11px;
-      color: rgba(255,255,255,0.5);
-      background: rgba(0,0,0,0.45);
-      padding: 3px 10px;
-      border-radius: 10px;
-      pointer-events: none;
-    }
 
     /* Flash overlay */
     #flash {
@@ -327,26 +315,6 @@
       justify-content: space-between;
     }
 
-    /* Filter button */
-    #filter-btn {
-      width: 48px;
-      height: 48px;
-      border-radius: 50%;
-      background: rgba(255,255,255,0.08);
-      border: none;
-      color: var(--text);
-      font-size: 13px;
-      font-weight: 600;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: background 0.15s;
-      letter-spacing: 0;
-    }
-
-    #filter-btn:active { background: rgba(255,255,255,0.15); }
-
     /* Shutter */
     #shutter {
       width: 70px;
@@ -362,26 +330,118 @@
 
     #shutter:active { transform: scale(0.91); background: #ddd; }
 
-    /* Share / PDF button */
-    #share-btn {
-      width: 48px;
+    /* Save button — pill (Google Drive style) */
+    #save-btn {
       height: 48px;
-      border-radius: 50%;
-      background: var(--accent);
+      padding: 0 20px;
+      border-radius: 24px;
+      background: rgba(255,255,255,0.12);
       border: none;
-      color: #0a0a0b;
-      font-size: 20px;
-      font-weight: 700;
+      color: rgba(255,255,255,0.4);
+      font-size: 15px;
+      font-weight: 600;
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
-      transition: transform 0.1s, opacity 0.2s;
-      opacity: 0.3;
+      transition: transform 0.1s, background 0.2s, color 0.2s;
+      white-space: nowrap;
+      pointer-events: none;
     }
+    #save-btn:not([disabled]) {
+      color: #fff;
+      background: rgba(255,255,255,0.22);
+      pointer-events: auto;
+    }
+    #save-btn:not([disabled]):active { transform: scale(0.95); }
 
-    #share-btn:not([disabled]) { opacity: 1; cursor: pointer; }
-    #share-btn:not([disabled]):active { transform: scale(0.91); }
+    /* Full-screen preview after capture */
+    #preview-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.88);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 50;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s;
+    }
+    #preview-overlay.show { opacity: 1; pointer-events: auto; }
+    #preview-img {
+      max-width: 88vw;
+      max-height: 80vh;
+      border-radius: 8px;
+      box-shadow: 0 8px 40px rgba(0,0,0,0.6);
+      transform: scale(0.95);
+      transition: transform 0.25s cubic-bezier(0.34,1.56,0.64,1);
+      display: block;
+    }
+    #preview-overlay.show #preview-img { transform: scale(1); }
+
+    /* Confirm sheet */
+    #confirm-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.55);
+      z-index: 60;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.25s;
+    }
+    #confirm-backdrop.show { opacity: 1; pointer-events: auto; }
+    #confirm-sheet {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      background: #1c1c1e;
+      border-radius: 16px 16px 0 0;
+      padding: 12px 20px 20px;
+      padding-bottom: calc(20px + env(safe-area-inset-bottom));
+      z-index: 61;
+      transform: translateY(100%);
+      transition: transform 0.32s cubic-bezier(0.32,0.72,0,1);
+    }
+    #confirm-sheet.show { transform: translateY(0); }
+    #confirm-handle {
+      width: 36px; height: 4px;
+      background: rgba(255,255,255,0.18);
+      border-radius: 2px;
+      margin: 0 auto 16px;
+    }
+    #confirm-thumbs {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 14px;
+      scrollbar-width: none;
+    }
+    #confirm-thumbs::-webkit-scrollbar { display: none; }
+    #confirm-thumbs img {
+      width: 64px;
+      height: 84px;
+      object-fit: cover;
+      border-radius: 6px;
+      flex-shrink: 0;
+      background: #333;
+    }
+    #confirm-filename {
+      font-size: 13px;
+      color: rgba(255,255,255,0.45);
+      margin-bottom: 16px;
+    }
+    #confirm-share-btn {
+      width: 100%;
+      padding: 15px;
+      background: var(--accent);
+      color: #0a0a0b;
+      border: none;
+      border-radius: 12px;
+      font-size: 16px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    #confirm-share-btn:active { opacity: 0.85; }
 
     /* Toast */
     #toast {
@@ -432,7 +492,6 @@
         <circle id="countdown-ring"  cx="26" cy="26" r="21"/>
       </svg>
     </div>
-    <div id="filter-label">文書強調</div>
     <div id="flash"></div>
     <div id="permission-error">
       <p style="font-size:32px">📷</p>
@@ -444,14 +503,28 @@
   <div id="bottom-bar">
     <div id="thumb-strip"></div>
     <div id="controls">
-      <button id="filter-btn" onclick="cycleFilter()">DOC</button>
+      <div style="width:48px"></div>
       <button id="shutter" onclick="manualCapture()"></button>
-      <button id="share-btn" onclick="generateAndShare()" disabled>↑</button>
+      <button id="save-btn" onclick="showConfirmSheet()" disabled>保存</button>
     </div>
   </div>
 </div>
 
 <div id="toast"></div>
+
+<!-- Full-screen preview after capture -->
+<div id="preview-overlay" onclick="closePreview()">
+  <img id="preview-img" alt="">
+</div>
+
+<!-- Confirm sheet before sharing -->
+<div id="confirm-backdrop" onclick="closeConfirmSheet()"></div>
+<div id="confirm-sheet">
+  <div id="confirm-handle"></div>
+  <div id="confirm-thumbs"></div>
+  <div id="confirm-filename"></div>
+  <button id="confirm-share-btn" onclick="doShare()">共有</button>
+</div>
 
 <script>
 // Global error display for debugging
@@ -471,9 +544,6 @@ const CAPTURE_MAX_W    = 2000; // max width for warp canvas
 const DETECT_W         = 80;   // detection resolution
 const STABLE_THRESHOLD = 25;   // ~0.8s at 30fps
 const CAPTURE_COOLDOWN = 5000; // ms between auto-captures
-const FILTERS = ['original', 'enhance', 'bw'];
-const FILTER_LABEL = { original: 'オリジナル', enhance: '文書強調', bw: '白黒' };
-const FILTER_BTN_TEXT = { original: 'RAW', enhance: 'DOC', bw: 'B&W' };
 
 // ============================================================
 // State
@@ -486,7 +556,7 @@ let lastCorners     = null;
 let smoothedCorners = null;
 let isCapturing      = false;
 let lastCaptureTime  = 0;
-let currentFilter = 'enhance';
+const currentFilter = 'enhance';
 let autoCaptureEnabled = true;
 let toastTimer;
 
@@ -502,9 +572,7 @@ const countdownRing  = document.getElementById('countdown-ring');
 const flashEl        = document.getElementById('flash');
 const thumbStrip     = document.getElementById('thumb-strip');
 const pageCountEl    = document.getElementById('page-count');
-const shareBtn       = document.getElementById('share-btn');
-const filterBtn      = document.getElementById('filter-btn');
-const filterLabel    = document.getElementById('filter-label');
+const saveBtn        = document.getElementById('save-btn');
 const permError      = document.getElementById('permission-error');
 const loadingEl      = document.getElementById('loading');
 
@@ -1328,9 +1396,18 @@ function addPage(canvas) {
   pages.push(canvas);
   renderThumbs();
   updatePageCount();
-  shareBtn.disabled = false;
-  shareBtn.style.opacity = '1';
-  showToast(`${pages.length} ページ追加`);
+  saveBtn.disabled = false;
+  // Full-screen preview (Google Drive style)
+  const overlay = document.getElementById('preview-overlay');
+  const img = document.getElementById('preview-img');
+  img.src = canvas.toDataURL('image/jpeg', 0.85);
+  overlay.classList.add('show');
+  if (addPage._timer) clearTimeout(addPage._timer);
+  addPage._timer = setTimeout(closePreview, 1800);
+}
+
+function closePreview() {
+  document.getElementById('preview-overlay').classList.remove('show');
 }
 
 function renderThumbs() {
@@ -1358,28 +1435,58 @@ function deletePage(i) {
   renderThumbs();
   updatePageCount();
   if (pages.length === 0) {
-    shareBtn.disabled = true;
-    shareBtn.style.opacity = '0.3';
+    saveBtn.disabled = true;
   }
   showToast('削除しました');
 }
 
 function updatePageCount() {
   pageCountEl.textContent = `${pages.length} ページ`;
+  saveBtn.textContent = pages.length > 0 ? `保存 (${pages.length})` : '保存';
 }
 
 // ============================================================
-// PDF generation & share
+// Confirm sheet & share
 // ============================================================
-async function generateAndShare() {
+function buildFileName() {
+  const now = new Date();
+  const ts = [
+    now.getFullYear(), '/',
+    String(now.getMonth()+1).padStart(2,'0'), '/',
+    String(now.getDate()).padStart(2,'0'), ' ',
+    String(now.getHours()).padStart(2,'0'), ':',
+    String(now.getMinutes()).padStart(2,'0'), ':',
+    String(now.getSeconds()).padStart(2,'0')
+  ].join('');
+  return `スキャン ${ts}.pdf`;
+}
+
+function showConfirmSheet() {
   if (!pages.length) return;
-  // Stop auto-capture during sharing
-  autoCaptureEnabled = false;
-  const btn = document.getElementById('auto-toggle');
-  btn.textContent = '手動';
-  btn.classList.add('off');
-  shareBtn.disabled = true;
-  shareBtn.textContent = '…';
+  closePreview();
+
+  // Populate thumbnails
+  const thumbs = document.getElementById('confirm-thumbs');
+  thumbs.innerHTML = '';
+  pages.forEach(c => {
+    const img = document.createElement('img');
+    img.src = c.toDataURL('image/jpeg', 0.65);
+    thumbs.appendChild(img);
+  });
+
+  document.getElementById('confirm-filename').textContent = buildFileName();
+  document.getElementById('confirm-backdrop').classList.add('show');
+  document.getElementById('confirm-sheet').classList.add('show');
+}
+
+function closeConfirmSheet() {
+  document.getElementById('confirm-backdrop').classList.remove('show');
+  document.getElementById('confirm-sheet').classList.remove('show');
+}
+
+async function doShare() {
+  closeConfirmSheet();
+  saveBtn.disabled = true;
   showToast('PDF 生成中...');
 
   await new Promise(r => setTimeout(r, 30));
@@ -1436,8 +1543,7 @@ async function generateAndShare() {
     fallbackDownload(blob, fileName);
   }
 
-  shareBtn.disabled = false;
-  shareBtn.textContent = '↑';
+  saveBtn.disabled = false;
 }
 
 function fallbackDownload(blob, name) {
@@ -1446,17 +1552,6 @@ function fallbackDownload(blob, name) {
   a.href = url; a.download = name; a.click();
   URL.revokeObjectURL(url);
   showToast('PDF を保存しました');
-}
-
-// ============================================================
-// Filter cycle
-// ============================================================
-function cycleFilter() {
-  const idx = FILTERS.indexOf(currentFilter);
-  currentFilter = FILTERS[(idx + 1) % FILTERS.length];
-  filterBtn.textContent   = FILTER_BTN_TEXT[currentFilter];
-  filterLabel.textContent = FILTER_LABEL[currentFilter];
-  showToast(FILTER_LABEL[currentFilter]);
 }
 
 function toggleAutoCapture() {
