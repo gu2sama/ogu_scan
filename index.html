@@ -140,38 +140,6 @@
       pointer-events: none;
     }
 
-    /* Countdown ring */
-    #countdown-wrap {
-      position: absolute;
-      bottom: 24px;
-      left: 50%;
-      transform: translateX(-50%);
-      width: 52px;
-      height: 52px;
-      opacity: 0;
-      transition: opacity 0.2s;
-      pointer-events: none;
-    }
-
-    #countdown-wrap.visible { opacity: 1; }
-
-    #countdown-svg { transform: rotate(-90deg); }
-
-    #countdown-track {
-      fill: none;
-      stroke: rgba(0,229,160,0.2);
-      stroke-width: 4;
-    }
-
-    #countdown-ring {
-      fill: none;
-      stroke: var(--accent);
-      stroke-width: 4;
-      stroke-linecap: round;
-      stroke-dasharray: 132;
-      stroke-dashoffset: 132;
-      transition: stroke-dashoffset 0.05s linear;
-    }
 
 
     /* Flash overlay */
@@ -602,12 +570,6 @@
     <div id="loading" style="display:none">カメラを起動中...</div>
     <video id="video" autoplay playsinline muted></video>
     <canvas id="overlay"></canvas>
-    <div id="countdown-wrap">
-      <svg id="countdown-svg" width="52" height="52" viewBox="0 0 52 52">
-        <circle id="countdown-track" cx="26" cy="26" r="21"/>
-        <circle id="countdown-ring"  cx="26" cy="26" r="21"/>
-      </svg>
-    </div>
     <div id="flash"></div>
     <div id="permission-error">
       <p style="font-size:32px">📷</p>
@@ -704,8 +666,6 @@ let toastTimer;
 const video          = document.getElementById('video');
 const overlay        = document.getElementById('overlay');
 const octx           = overlay.getContext('2d');
-const countdownWrap  = document.getElementById('countdown-wrap');
-const countdownRing  = document.getElementById('countdown-ring');
 const flashEl        = document.getElementById('flash');
 const thumbStrip     = document.getElementById('thumb-strip');
 const saveBtn        = document.getElementById('save-btn');
@@ -833,13 +793,12 @@ function loop() {
     }
     lastCorners = smoothedCorners;
 
-    const stable = stableFrames >= STABLE_THRESHOLD;
-    drawOverlay(displayCorners, stable);
-    setStatus(stable ? 'stable' : 'detecting');
-    setCountdown(stableFrames / STABLE_THRESHOLD);
+    const progress = stableFrames / STABLE_THRESHOLD;
+    drawOverlay(displayCorners, progress);
+    setStatus(progress >= 1 ? 'stable' : 'detecting');
 
     const now = Date.now();
-    if (stable && !isCapturing && autoCaptureEnabled &&
+    if (progress >= 1 && !isCapturing && autoCaptureEnabled &&
         isValidQuad(smoothedCorners, pw, ph) &&
         now - lastCaptureTime > CAPTURE_COOLDOWN) {
       lastCaptureTime = now;
@@ -851,7 +810,6 @@ function loop() {
     smoothedCorners = null;
     octx.clearRect(0, 0, dw, dh);
     setStatus('searching');
-    setCountdown(0);
   }
 }
 
@@ -1932,30 +1890,38 @@ function toggleAutoCapture() {
 // ============================================================
 // Overlay drawing
 // ============================================================
-function drawOverlay(corners, stable) {
+function drawOverlay(corners, progress) {
   octx.clearRect(0, 0, overlay.width, overlay.height);
   const [tl, tr, br, bl] = corners;
-  const t = Date.now();
-  const alpha = stable ? 0.75 + 0.25 * Math.sin(t / 180) : 0.5;
+
+  // Last 15% → transition fill toward white (pre-capture signal)
+  const preCapture = Math.max(0, (progress - 0.85) / 0.15);
 
   octx.save();
-  octx.strokeStyle = `rgba(0,229,160,${alpha})`;
-  octx.lineWidth   = 2;
-  octx.setLineDash(stable ? [] : [8, 6]);
-
   octx.beginPath();
   octx.moveTo(...tl); octx.lineTo(...tr);
   octx.lineTo(...br); octx.lineTo(...bl);
   octx.closePath();
+
+  // Fill: green accumulates, then white washes over
+  octx.fillStyle = `rgba(0,229,160,${0.04 + progress * 0.28})`;
+  octx.fill();
+  if (preCapture > 0) {
+    octx.fillStyle = `rgba(255,255,255,${preCapture * 0.45})`;
+    octx.fill();
+  }
+
+  // Outline: dashed while unstable → solid, thickens as progress rises
+  const strokeAlpha = 0.5 + progress * 0.5;
+  octx.strokeStyle = `rgba(0,229,160,${strokeAlpha})`;
+  octx.lineWidth   = 2 + progress * 1.5;
+  octx.setLineDash(progress < 0.25 ? [8, 6] : []);
   octx.stroke();
 
-  octx.fillStyle = 'rgba(0,229,160,0.06)';
-  octx.fill();
-
-  // Corner markers
+  // Corner markers: grow with progress
   octx.setLineDash([]);
-  octx.fillStyle = `rgba(0,229,160,${alpha})`;
-  const m = 9;
+  octx.fillStyle = `rgba(0,229,160,${strokeAlpha})`;
+  const m = 7 + progress * 6;
   [tl, tr, br, bl].forEach(([x, y]) => {
     octx.fillRect(x - m/2, y - m/2, m, m);
   });
@@ -1968,11 +1934,6 @@ function drawOverlay(corners, stable) {
 // ============================================================
 function setStatus(_state) { /* status pill removed — overlay communicates state visually */ }
 
-function setCountdown(progress) {
-  const circ = 132;
-  countdownRing.style.strokeDashoffset = circ * (1 - progress);
-  countdownWrap.classList.toggle('visible', progress > 0.01);
-}
 
 function flashEffect() {
   flashEl.style.transition = 'none';
