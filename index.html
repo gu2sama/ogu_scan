@@ -283,23 +283,21 @@
 
     .thumb-del {
       position: absolute;
-      top: 2px;
-      right: 2px;
-      width: 16px;
-      height: 16px;
+      top: -5px;
+      right: -5px;
+      width: 18px;
+      height: 18px;
       border-radius: 50%;
       background: var(--danger);
       color: #fff;
-      font-size: 9px;
+      font-size: 10px;
+      font-weight: 700;
       display: flex;
       align-items: center;
       justify-content: center;
-      opacity: 0;
-      transition: opacity 0.15s;
       cursor: pointer;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.4);
     }
-
-    .thumb.show-del .thumb-del { opacity: 1; }
 
     /* Controls row */
     #controls {
@@ -446,12 +444,12 @@ window.onerror = function(msg, src, line) {
 // ============================================================
 // Constants
 // ============================================================
-const STABLE_THRESHOLD = 15;   // frames (~0.5s @30fps)
 const STABLE_MOVE_MAX  = 12;   // px (in process space)
 const PROCESS_W        = 640;  // processing resolution width
 const CAPTURE_MAX_W    = 1100; // max width for warp canvas
-const BRIGHT_THRESHOLD = 150;  // brightness cutoff: document (bright) vs background (dark)
 const DETECT_W         = 80;   // detection resolution
+const STABLE_THRESHOLD = 30;   // ~1 second at 30fps
+const CAPTURE_COOLDOWN = 2500; // ms between auto-captures
 const FILTERS = ['original', 'enhance', 'bw'];
 const FILTER_LABEL = { original: 'オリジナル', enhance: '文書強調', bw: '白黒' };
 const FILTER_BTN_TEXT = { original: 'AUTO', enhance: 'DOC', bw: 'B&W' };
@@ -465,7 +463,8 @@ let pages        = [];
 let stableFrames    = 0;
 let lastCorners     = null;
 let smoothedCorners = null;
-let isCapturing     = false;
+let isCapturing      = false;
+let lastCaptureTime  = 0;
 let currentFilter = 'original';
 let toastTimer;
 
@@ -604,7 +603,11 @@ function loop() {
     setStatus(stable ? 'stable' : 'detecting');
     setCountdown(stableFrames / STABLE_THRESHOLD);
 
-    if (stable && !isCapturing && isValidQuad(smoothedCorners, pw, ph)) {
+    const now = Date.now();
+    if (stable && !isCapturing &&
+        isValidQuad(smoothedCorners, pw, ph) &&
+        now - lastCaptureTime > CAPTURE_COOLDOWN) {
+      lastCaptureTime = now;
       captureDocument(smoothedCorners, pw, ph, vw, vh);
     }
   } else {
@@ -649,14 +652,20 @@ function processToDisplay(px, py, pw, ph, vw, vh, dw, dh) {
 // Document detection
 // ============================================================
 function detectDocument(data, w, h) {
-  // Brightness-based detection: white paper > background
+  // Adaptive threshold: mean brightness + 50 (ignores room/background brightness)
+  let lumSum = 0;
+  for (let i = 0; i < w * h; i++) {
+    lumSum += (data[i*4] * 77 + data[i*4+1] * 150 + data[i*4+2] * 29) >> 8;
+  }
+  const threshold = Math.min(230, (lumSum / (w * h)) + 50);
+
   const mask = new Uint8Array(w * h);
   let brightCount = 0;
   let minX = w, maxX = 0, minY = h, maxY = 0;
 
   for (let i = 0; i < w * h; i++) {
     const lum = (data[i*4] * 77 + data[i*4+1] * 150 + data[i*4+2] * 29) >> 8;
-    if (lum > BRIGHT_THRESHOLD) {
+    if (lum > threshold) {
       mask[i] = 1;
       brightCount++;
       const x = i % w, y = i / w | 0;
@@ -958,13 +967,6 @@ function renderThumbs() {
     del.className = 'thumb-del';
     del.textContent = '×';
     del.onclick = e => { e.stopPropagation(); deletePage(i); };
-
-    // Long-press to show delete on mobile
-    let pressTimer;
-    wrap.addEventListener('touchstart', () => {
-      pressTimer = setTimeout(() => wrap.classList.add('show-del'), 500);
-    }, { passive: true });
-    wrap.addEventListener('touchend', () => clearTimeout(pressTimer), { passive: true });
 
     wrap.append(img, del);
     thumbStrip.append(wrap);
