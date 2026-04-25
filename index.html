@@ -625,7 +625,7 @@
       <button id="flash-btn" onclick="toggleFlash()">⚡</button>
       <button id="filter-btn" onclick="cycleFilter()">カラー</button>
     </div>
-    <button id="auto-toggle" onclick="toggleAutoCapture()">AUTO</button>
+    <button id="auto-toggle" class="off" onclick="toggleAutoCapture()">手動</button>
   </header>
 
   <div id="camera-wrap">
@@ -731,7 +731,7 @@ window.onerror = function(msg, src, line) {
 const STABLE_MOVE_MAX  = 15;   // px (in process space)
 const PROCESS_W        = 640;  // processing resolution width
 const CAPTURE_MAX_W    = 2000; // max width for warp canvas
-const DETECT_W         = 80;   // detection resolution
+const DETECT_W         = 160;  // detection resolution
 const STABLE_THRESHOLD = 25;   // ~0.8s at 30fps
 const CAPTURE_COOLDOWN = 5000; // ms between auto-captures
 const FILTERS       = ['original', 'enhance', 'bw'];
@@ -749,7 +749,7 @@ let smoothedCorners = null;
 let isCapturing      = false;
 let lastCaptureTime  = 0;
 let currentFilter      = 'original';
-let autoCaptureEnabled = true;
+let autoCaptureEnabled = false;
 let flashOn            = false;
 let cvReady            = false;
 let cvFrameCount       = 0;
@@ -1891,15 +1891,21 @@ function detectDocOpenCV(data, w, h) {
       const cnt = contours.get(i);
       const area = C.contourArea(cnt);
       if (area >= minArea) {
-        const approx = new C.Mat();
-        C.approxPolyDP(cnt, approx, 0.02 * C.arcLength(cnt, true), true);
-        if (approx.rows === 4) {
-          const pts = [];
-          for (let j = 0; j < 4; j++) pts.push([approx.data32S[j*2], approx.data32S[j*2+1]]);
-          const ordered = orderCvCorners(pts);
-          if (isValidQuad(ordered, w, h) && area > bestArea) { bestArea = area; bestQuad = ordered; }
+        const arcLen = C.arcLength(cnt, true);
+        let foundQuad = null;
+        for (const eps of [0.02, 0.04, 0.06]) {
+          const approx = new C.Mat();
+          C.approxPolyDP(cnt, approx, eps * arcLen, true);
+          if (approx.rows === 4) {
+            const pts = [];
+            for (let j = 0; j < 4; j++) pts.push([approx.data32S[j*2], approx.data32S[j*2+1]]);
+            foundQuad = orderCvCorners(pts);
+            approx.delete();
+            break;
+          }
+          approx.delete();
         }
-        approx.delete();
+        if (foundQuad && isValidQuad(foundQuad, w, h) && area > bestArea) { bestArea = area; bestQuad = foundQuad; }
       }
       cnt.delete();
     }
