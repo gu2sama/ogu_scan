@@ -604,7 +604,7 @@ function loop() {
     setStatus(stable ? 'stable' : 'detecting');
     setCountdown(stableFrames / STABLE_THRESHOLD);
 
-    if (stable && !isCapturing) {
+    if (stable && !isCapturing && isValidQuad(smoothedCorners, pw, ph)) {
       captureDocument(smoothedCorners, pw, ph, vw, vh);
     }
   } else {
@@ -677,8 +677,36 @@ function detectDocument(data, w, h) {
   if (relArea     < 0.08 || relArea     > 0.98) return { detected: false };
   if (regionW < 5 || regionH < 5)               return { detected: false };
 
-  const corners = findCorners(mask, w, h, minX, maxX, minY, maxY);
+  // Shrink bounding box by 1px to exclude boundary noise before finding corners
+  const pad = 1;
+  const corners = findCorners(mask, w, h,
+    minX + pad, maxX - pad, minY + pad, maxY - pad);
   return { detected: true, corners };
+}
+
+// Validate detected quadrilateral looks like a real document
+function isValidQuad(corners, fw, fh) {
+  const [tl, tr, br, bl] = corners;
+  const topW  = dist(tl, tr);
+  const botW  = dist(bl, br);
+  const leftH = dist(tl, bl);
+  const rightH= dist(tr, br);
+  const avgW  = (topW + botW) / 2;
+  const avgH  = (leftH + rightH) / 2;
+  if (avgW < 10 || avgH < 10) return false;
+
+  // Aspect ratio must be plausible for a document (0.3 ~ 3.5)
+  const ar = avgW / avgH;
+  if (ar < 0.3 || ar > 3.5) return false;
+
+  // Opposite sides must be roughly parallel (ratio 0.4 ~ 2.5)
+  if (topW / botW   < 0.4 || topW / botW   > 2.5) return false;
+  if (leftH / rightH < 0.4 || leftH / rightH > 2.5) return false;
+
+  // Area must be at least 10% of frame
+  if ((avgW * avgH) / (fw * fh) < 0.10) return false;
+
+  return true;
 }
 
 // Find 4 document corners using extreme-point scoring on bright-pixel mask
