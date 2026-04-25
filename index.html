@@ -454,14 +454,48 @@
       scrollbar-width: none;
     }
     #confirm-thumbs::-webkit-scrollbar { display: none; }
-    #confirm-thumbs img {
+    .confirm-thumb-wrap {
+      position: relative;
+      flex-shrink: 0;
+    }
+    .confirm-thumb-wrap img {
       width: 64px;
       height: 84px;
       object-fit: cover;
       border-radius: 6px;
-      flex-shrink: 0;
+      display: block;
       background: #333;
     }
+    .confirm-thumb-del {
+      position: absolute;
+      top: -6px;
+      right: -6px;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: var(--danger);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+      border: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+    #confirm-cancel-btn {
+      width: 100%;
+      padding: 14px;
+      background: rgba(255,255,255,0.08);
+      color: rgba(255,255,255,0.7);
+      border: none;
+      border-radius: 12px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 10px;
+    }
+    #confirm-cancel-btn:active { opacity: 0.7; }
     #confirm-filename {
       font-size: 13px;
       color: rgba(255,255,255,0.45);
@@ -564,6 +598,7 @@
   <div id="confirm-thumbs"></div>
   <div id="confirm-filename"></div>
   <button id="confirm-share-btn" onclick="doShare()">共有</button>
+  <button id="confirm-cancel-btn" onclick="closeConfirmSheet()">キャンセル</button>
 </div>
 
 <script>
@@ -1523,17 +1558,35 @@ function showConfirmSheet() {
   autoCaptureEnabled = false;
 
   // Populate thumbnails
-  const thumbs = document.getElementById('confirm-thumbs');
-  thumbs.innerHTML = '';
-  pages.forEach(c => {
-    const img = document.createElement('img');
-    img.src = c.toDataURL('image/jpeg', 0.65);
-    thumbs.appendChild(img);
-  });
+  renderConfirmThumbs();
 
   document.getElementById('confirm-filename').textContent = buildFileName();
   document.getElementById('confirm-backdrop').classList.add('show');
   document.getElementById('confirm-sheet').classList.add('show');
+}
+
+function renderConfirmThumbs() {
+  const thumbs = document.getElementById('confirm-thumbs');
+  thumbs.innerHTML = '';
+  pages.forEach((c, i) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'confirm-thumb-wrap';
+    const img = document.createElement('img');
+    img.src = c.toDataURL('image/jpeg', 0.65);
+    const del = document.createElement('button');
+    del.className = 'confirm-thumb-del';
+    del.textContent = '×';
+    del.onclick = () => {
+      pages.splice(i, 1);
+      renderThumbs();
+      updatePageCount();
+      if (!pages.length) { closeConfirmSheet(); return; }
+      renderConfirmThumbs();
+      document.getElementById('confirm-filename').textContent = buildFileName();
+    };
+    wrap.append(img, del);
+    thumbs.appendChild(wrap);
+  });
 }
 
 function closeConfirmSheet() {
