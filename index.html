@@ -54,10 +54,6 @@
 
     #logo span { color: var(--accent); }
 
-    #page-count {
-      font-size: 13px;
-      color: rgba(255,255,255,0.6);
-    }
 
     /* Auto-capture toggle */
     #auto-toggle {
@@ -84,12 +80,6 @@
       display: flex;
       gap: 8px;
       align-items: center;
-    }
-
-    #header-right {
-      display: flex;
-      align-items: center;
-      gap: 10px;
     }
 
     #flash-btn {
@@ -524,10 +514,7 @@
       <button id="flash-btn" onclick="toggleFlash()">⚡</button>
       <button id="filter-btn" onclick="cycleFilter()">カラー</button>
     </div>
-    <div id="header-right">
-      <button id="auto-toggle" onclick="toggleAutoCapture()">AUTO</button>
-      <div id="page-count">0 ページ</div>
-    </div>
+    <button id="auto-toggle" onclick="toggleAutoCapture()">AUTO</button>
   </header>
 
   <div id="camera-wrap">
@@ -627,7 +614,6 @@ const countdownWrap  = document.getElementById('countdown-wrap');
 const countdownRing  = document.getElementById('countdown-ring');
 const flashEl        = document.getElementById('flash');
 const thumbStrip     = document.getElementById('thumb-strip');
-const pageCountEl    = document.getElementById('page-count');
 const saveBtn        = document.getElementById('save-btn');
 const permError      = document.getElementById('permission-error');
 const loadingEl      = document.getElementById('loading');
@@ -1010,17 +996,31 @@ function detectDocEdges(data, w, h) {
 }
 
 // ============================================================
-// Document detection (hybrid: brightness-first → edge fallback)
+// Document detection — run both methods, prefer larger quad
 // ============================================================
+function quadArea(corners) {
+  const [tl, tr, br, bl] = corners;
+  return 0.5 * Math.abs(
+    tl[0]*tr[1] - tr[0]*tl[1] + tr[0]*br[1] - br[0]*tr[1] +
+    br[0]*bl[1] - bl[0]*br[1] + bl[0]*tl[1] - tl[0]*bl[1]);
+}
+
 function detectDocument(data, w, h) {
-  // Primary: brightness-based (stable for white/light paper on darker surfaces)
   const brightResult = detectDocBrightness(data, w, h);
+  const edgeCorners  = detectDocEdges(data, w, h);
+
+  if (brightResult.detected && edgeCorners) {
+    // Both succeeded — prefer the larger quad.
+    // Brightness can find an inner region when shadow hides corners;
+    // edge-based finds the true document boundary in that case.
+    const bArea = quadArea(brightResult.corners);
+    const eArea = quadArea(edgeCorners);
+    if (eArea > bArea * 1.08) return { detected: true, corners: edgeCorners };
+    return brightResult;
+  }
+
   if (brightResult.detected) return brightResult;
-
-  // Fallback: edge-based (handles white-on-white, transparent docs, low contrast)
-  const edgeQ = detectDocEdges(data, w, h);
-  if (edgeQ) return { detected: true, corners: edgeQ };
-
+  if (edgeCorners)           return { detected: true, corners: edgeCorners };
   return { detected: false };
 }
 
@@ -1497,7 +1497,6 @@ function deletePage(i) {
 }
 
 function updatePageCount() {
-  pageCountEl.textContent = `${pages.length} ページ`;
   saveBtn.textContent = pages.length > 0 ? `保存 (${pages.length})` : '保存';
 }
 
