@@ -766,6 +766,8 @@ let editMode    = 'none';
 let editHandles = [];   // [[x,y]×4] in editor-canvas display px
 let editDragIdx = -1;
 let _edScale    = 1;    // srcCanvas px → editor-canvas display px
+let _edOffX     = 0;    // crop origin X in srcCanvas px
+let _edOffY     = 0;    // crop origin Y in srcCanvas px
 
 // ============================================================
 // DOM refs
@@ -1615,12 +1617,15 @@ function applyFilter(canvas, filter) {
   for (let i = 0, p = 0; i < s.length; i += 4, p++) {
     let t = Math.min(1, Math.max(0, (norm[p] - lo) / range));
     if (filter === 'enhance') {
-      // S-curve: paper→white, ink→black
-      t = Math.min(1, Math.max(0, 0.5 + (t - 0.5) * 2.8));
-      t = Math.pow(t, 0.5); // gamma lift — pushes remaining gray to clean white
+      // S-curve: paper→white, ink→dark — gentler than before to avoid over-darkening shadows
+      t = Math.min(1, Math.max(0, 0.5 + (t - 0.5) * 2.0));
+      t = Math.pow(t, 0.65); // gamma lift — pushes remaining gray to clean white
       s[i] = s[i+1] = s[i+2] = (t * 255 + 0.5) | 0;
     } else {
-      s[i] = s[i+1] = s[i+2] = t > 0.52 ? 255 : 0;
+      // bw: same gentle S-curve, then binarize at lower threshold to keep more white
+      t = Math.min(1, Math.max(0, 0.5 + (t - 0.5) * 2.0));
+      t = Math.pow(t, 0.65);
+      s[i] = s[i+1] = s[i+2] = t > 0.42 ? 255 : 0;
     }
   }
   ctx.putImageData(srcImg, 0, 0);
@@ -2184,19 +2189,36 @@ function _drawEditorAdjust() {
     showToast('調整データがありません');
     return;
   }
-  const ec   = document.getElementById('editor-canvas');
-  const wrap = document.getElementById('editor-canvas-wrap');
-  const maxW = wrap.clientWidth;
-  const maxH = wrap.clientHeight;
-  const srcC = src.canvas;
-  _edScale   = Math.min(maxW / srcC.width, maxH / srcC.height);
-  const dw   = Math.round(srcC.width  * _edScale);
-  const dh   = Math.round(srcC.height * _edScale);
-  ec.width   = dw;
-  ec.height  = dh;
+  const ec      = document.getElementById('editor-canvas');
+  const wrap    = document.getElementById('editor-canvas-wrap');
+  const maxW    = wrap.clientWidth;
+  const maxH    = wrap.clientHeight;
+  const srcC    = src.canvas;
+  const corners = src.corners;
+
+  // Crop to document bounding box + 12% padding — fills screen much better
+  const xs   = corners.map(c => c[0]), ys = corners.map(c => c[1]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const padX = (maxX - minX) * 0.14, padY = (maxY - minY) * 0.14;
+  _edOffX = Math.max(0, minX - padX);
+  _edOffY = Math.max(0, minY - padY);
+  const cropW = Math.min(srcC.width  - _edOffX, (maxX - minX) + padX * 2);
+  const cropH = Math.min(srcC.height - _edOffY, (maxY - minY) + padY * 2);
+
+  _edScale = Math.min(maxW / cropW, maxH / cropH);
+  const dw = Math.round(cropW * _edScale);
+  const dh = Math.round(cropH * _edScale);
+  ec.width  = dw;
+  ec.height = dh;
   ec.style.width  = dw + 'px';
   ec.style.height = dh + 'px';
-  editHandles = src.corners.map(([x, y]) => [x * _edScale, y * _edScale]);
+
+  // Convert corners: src space → display space (offset by crop origin)
+  editHandles = corners.map(([x, y]) => [
+    (x - _edOffX) * _edScale,
+    (y - _edOffY) * _edScale
+  ]);
   _redrawAdjust(srcC);
 }
 
@@ -2204,30 +2226,33 @@ function _redrawAdjust(srcCanvas) {
   const ec  = document.getElementById('editor-canvas');
   const ctx = ec.getContext('2d');
   ctx.clearRect(0, 0, ec.width, ec.height);
-  ctx.globalAlpha = 0.72;
-  ctx.drawImage(srcCanvas, 0, 0, ec.width, ec.height);
-  ctx.globalAlpha = 1;
+
+  // Draw cropped source image
+  const cropW = ec.width  / _edScale;
+  const cropH = ec.height / _edScale;
+  ctx.drawImage(srcCanvas, _edOffX, _edOffY, cropW, cropH, 0, 0, ec.width, ec.height);
 
   const [tl, tr, br, bl] = editHandles;
   ctx.beginPath();
   ctx.moveTo(...tl); ctx.lineTo(...tr);
   ctx.lineTo(...br); ctx.lineTo(...bl);
   ctx.closePath();
-  ctx.fillStyle   = 'rgba(0,229,160,0.18)';
+  ctx.fillStyle   = 'rgba(0,229,160,0.15)';
   ctx.fill();
-  ctx.strokeStyle = 'rgba(0,229,160,0.9)';
+  ctx.strokeStyle = 'rgba(0,229,160,0.85)';
   ctx.lineWidth   = 2;
   ctx.setLineDash([]);
   ctx.stroke();
 
-  const R = 20;
+  // Small clean handles: black shadow ring + green fill
+  const R = 11;
   editHandles.forEach(([x, y]) => {
+    ctx.beginPath(); ctx.arc(x, y, R + 1.5, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fill();
     ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI*2);
-    ctx.fillStyle = 'rgba(0,229,160,0.9)'; ctx.fill();
-    ctx.beginPath(); ctx.arc(x, y, R - 4, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(0,229,160,1)'; ctx.fill();
+    ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI*2);
     ctx.fillStyle = '#0a0a0b'; ctx.fill();
-    ctx.beginPath(); ctx.arc(x, y, R - 9, 0, Math.PI*2);
-    ctx.fillStyle = 'rgba(0,229,160,0.9)'; ctx.fill();
   });
 }
 
@@ -2294,7 +2319,7 @@ function _commitAdjust() {
   if (editIndex < 0 || editHandles.length < 4) return;
   const src = pageSrcs[editIndex];
   if (!src) return;
-  const newCorners = editHandles.map(([x, y]) => [x / _edScale, y / _edScale]);
+  const newCorners = editHandles.map(([x, y]) => [x / _edScale + _edOffX, y / _edScale + _edOffY]);
   const [tl, tr, br, bl] = newCorners;
   const outW = Math.round(Math.max(dist(tl, tr), dist(bl, br)));
   const outH = Math.round(Math.max(dist(tl, bl), dist(tr, br)));
