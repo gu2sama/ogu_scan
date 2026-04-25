@@ -598,23 +598,31 @@
     .editor-tool-btn:active { opacity: 0.7; }
     #editor-filter-bar {
       position: absolute; bottom: 0; left: 0; right: 0;
-      display: none; justify-content: center; gap: 10px;
-      padding: 14px 16px;
+      display: none; flex-direction: row; gap: 10px;
+      padding: 10px 16px;
+      padding-bottom: calc(10px + env(safe-area-inset-bottom));
       background: rgba(10,10,11,0.95);
       border-top: 1px solid rgba(255,255,255,0.08);
+      overflow-x: auto; scrollbar-width: none;
+      -webkit-overflow-scrolling: touch;
     }
+    #editor-filter-bar::-webkit-scrollbar { display: none; }
     #editor-filter-bar.show { display: flex; }
     .editor-filter-opt {
-      padding: 8px 20px; border-radius: 20px;
-      border: 1.5px solid rgba(255,255,255,0.2);
-      background: rgba(255,255,255,0.06);
-      color: var(--text); font-size: 13px; font-weight: 600;
-      cursor: pointer; -webkit-tap-highlight-color: transparent;
+      display: flex; flex-direction: column; align-items: center; gap: 5px;
+      background: none; border: none; cursor: pointer; padding: 0;
+      flex-shrink: 0; -webkit-tap-highlight-color: transparent;
     }
-    .editor-filter-opt.active {
-      border-color: var(--accent); color: var(--accent);
-      background: rgba(0,229,160,0.12);
+    .editor-filter-thumb {
+      width: 58px; height: 75px; object-fit: cover;
+      border-radius: 6px; border: 2.5px solid transparent; display: block;
     }
+    .editor-filter-opt.active .editor-filter-thumb { border-color: var(--accent); }
+    .editor-filter-label {
+      font-size: 10px; color: rgba(255,255,255,0.5);
+      font-weight: 600; white-space: nowrap;
+    }
+    .editor-filter-opt.active .editor-filter-label { color: var(--accent); }
   </style>
 </head>
 <body>
@@ -623,7 +631,7 @@
     <div id="logo">ogu<span>_scan</span></div>
     <div id="header-center">
       <button id="flash-btn" onclick="toggleFlash()">⚡</button>
-      <button id="filter-btn" onclick="cycleFilter()">カラー</button>
+      <button id="filter-btn" onclick="cycleFilter()">なし</button>
     </div>
     <button id="auto-toggle" class="off" onclick="toggleAutoCapture()">連続</button>
   </header>
@@ -694,11 +702,7 @@
   </div>
   <div id="editor-canvas-wrap">
     <canvas id="editor-canvas"></canvas>
-    <div id="editor-filter-bar">
-      <button class="editor-filter-opt" data-filter="original" onclick="editorPickFilter('original')">カラー</button>
-      <button class="editor-filter-opt" data-filter="enhance"  onclick="editorPickFilter('enhance')">文書</button>
-      <button class="editor-filter-opt" data-filter="bw"       onclick="editorPickFilter('bw')">白黒</button>
-    </div>
+    <div id="editor-filter-bar"></div>
   </div>
   <div id="editor-toolbar">
     <button class="editor-tool-btn" id="editor-btn-adjust" onclick="editorSetMode('adjust')">
@@ -734,8 +738,8 @@ const CAPTURE_MAX_W    = 2000; // max width for warp canvas
 const DETECT_W         = 160;  // detection resolution
 const STABLE_THRESHOLD = 25;   // ~0.8s at 30fps
 const CAPTURE_COOLDOWN = 5000; // ms between auto-captures
-const FILTERS       = ['original', 'enhance', 'bw'];
-const FILTER_LABELS = { original: 'カラー', enhance: '文書', bw: '白黒' };
+const FILTERS       = ['original', 'brighten', 'document', 'enhance', 'bw'];
+const FILTER_LABELS = { original: 'なし', brighten: '明るく', document: 'ドキュメント', enhance: '拡張', bw: '白黒' };
 
 // ============================================================
 // State
@@ -1581,8 +1585,47 @@ function applyFilter(canvas, filter) {
   if (filter === 'original') return canvas;
 
   const w = canvas.width, h = canvas.height;
+
+  // brighten: simple per-channel gamma — no background division, no blow-out
+  if (filter === 'brighten') {
+    const out = document.createElement('canvas');
+    out.width = w; out.height = h;
+    const ctx = out.getContext('2d');
+    ctx.drawImage(canvas, 0, 0);
+    const imgData = ctx.getImageData(0, 0, w, h);
+    const d = imgData.data;
+    for (let i = 0; i < d.length; i += 4) {
+      d[i]   = Math.pow(d[i]   / 255, 0.60) * 255 + 0.5 | 0;
+      d[i+1] = Math.pow(d[i+1] / 255, 0.60) * 255 + 0.5 | 0;
+      d[i+2] = Math.pow(d[i+2] / 255, 0.60) * 255 + 0.5 | 0;
+    }
+    ctx.putImageData(imgData, 0, 0);
+    return out;
+  }
+
   const bgCanvas = estimateBackground(canvas);
 
+  // bw: adaptive local threshold — compare each pixel to local background luminance
+  if (filter === 'bw') {
+    const out = document.createElement('canvas');
+    out.width = w; out.height = h;
+    const ctx = out.getContext('2d');
+    ctx.drawImage(canvas, 0, 0);
+    const srcData = ctx.getImageData(0, 0, w, h);
+    const bgData  = bgCanvas.getContext('2d').getImageData(0, 0, w, h);
+    const s = srcData.data, bg = bgData.data;
+    for (let i = 0; i < s.length; i += 4) {
+      const lum   = (s[i]*77  + s[i+1]*150  + s[i+2]*29)  >> 8;
+      const bgLum = Math.max(30, (bg[i]*77 + bg[i+1]*150 + bg[i+2]*29) >> 8);
+      const ink = lum < bgLum * 0.75;
+      s[i] = s[i+1] = s[i+2] = ink ? 0 : 255;
+      s[i+3] = 255;
+    }
+    ctx.putImageData(srcData, 0, 0);
+    return out;
+  }
+
+  // document / enhance: background division + percentile stretch + S-curve
   const out = document.createElement('canvas');
   out.width = w; out.height = h;
   const ctx = out.getContext('2d');
@@ -1592,46 +1635,42 @@ function applyFilter(canvas, filter) {
   const s = srcImg.data, bg = bgImg.data;
   const pixels = w * h;
 
-  // Pass 1: background division → normalized values + histogram
+  // Pass 1: background division → normalized luminance + histogram
   const norm = new Uint8ClampedArray(pixels);
   const hist = new Int32Array(256);
   for (let i = 0, p = 0; i < s.length; i += 4, p++) {
     const lum   = (s[i]*77 + s[i+1]*150 + s[i+2]*29) >> 8;
     const bgLum = Math.max(1, (bg[i]*77 + bg[i+1]*150 + bg[i+2]*29) >> 8);
-    const n = Math.min(255, (lum / bgLum * 250) | 0);
+    const n = Math.min(255, (lum / bgLum * 240) | 0);
     norm[p] = n;
     hist[n]++;
   }
 
-  // Adaptive percentile stretch: find 1st and 97th percentile
+  // Percentile stretch at 2nd / 95th (less aggressive clipping)
   let lo = 0, hi = 255, cumul = 0;
-  const p1target  = pixels * 0.01;
-  const p97target = pixels * 0.97;
+  const p2target  = pixels * 0.02;
+  const p95target = pixels * 0.95;
   for (let v = 0; v < 256; v++) {
     cumul += hist[v];
-    if (cumul < p1target)  lo = v;
-    if (cumul < p97target) hi = v;
+    if (cumul < p2target)  lo = v;
+    if (cumul < p95target) hi = v;
   }
   const range = Math.max(1, hi - lo);
 
-  // Pass 2: stretch + S-curve
+  // document: soft S-curve (1.15×) + light gamma (0.90) — avoids blow-out
+  // enhance:  moderate S-curve (1.6×) + gamma (0.75) — stronger but controlled
+  const sCurve = filter === 'enhance' ? 1.6  : 1.15;
+  const gamma  = filter === 'enhance' ? 0.75 : 0.90;
+
   for (let i = 0, p = 0; i < s.length; i += 4, p++) {
     let t = Math.min(1, Math.max(0, (norm[p] - lo) / range));
-    if (filter === 'enhance') {
-      // S-curve: paper→white, ink→dark — gentler than before to avoid over-darkening shadows
-      t = Math.min(1, Math.max(0, 0.5 + (t - 0.5) * 2.0));
-      t = Math.pow(t, 0.65); // gamma lift — pushes remaining gray to clean white
-      s[i] = s[i+1] = s[i+2] = (t * 255 + 0.5) | 0;
-    } else {
-      // bw: same gentle S-curve, then binarize at lower threshold to keep more white
-      t = Math.min(1, Math.max(0, 0.5 + (t - 0.5) * 2.0));
-      t = Math.pow(t, 0.65);
-      s[i] = s[i+1] = s[i+2] = t > 0.42 ? 255 : 0;
-    }
+    t = Math.min(1, Math.max(0, 0.5 + (t - 0.5) * sCurve));
+    t = Math.pow(t, gamma);
+    s[i] = s[i+1] = s[i+2] = (t * 255 + 0.5) | 0;
   }
   ctx.putImageData(srcImg, 0, 0);
 
-  return filter === 'enhance' ? sharpenCanvas(out, 0.65) : out;
+  return filter === 'enhance' ? sharpenCanvas(out, 0.55) : out;
 }
 
 // ============================================================
@@ -2165,7 +2204,7 @@ function editorSetMode(mode) {
     _drawEditorAdjust();
   } else {
     _drawEditorPage();
-    _updateFilterBar();
+    _buildFilterThumbs();
     document.getElementById('editor-filter-bar').classList.add('show');
   }
 }
@@ -2347,14 +2386,42 @@ function editorPickFilter(filter) {
   pages[editIndex] = applyFilter(pageWarped[editIndex], filter);
   _drawEditorPage();
   renderThumbs();
-  _updateFilterBar();
+  _buildFilterThumbs();
   showToast(FILTER_LABELS[filter]);
 }
 
-function _updateFilterBar() {
-  const cur = pageFilters[editIndex] || 'original';
-  document.querySelectorAll('.editor-filter-opt').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.filter === cur);
+function _buildFilterThumbs() {
+  const bar = document.getElementById('editor-filter-bar');
+  bar.innerHTML = '';
+  if (editIndex < 0) return;
+
+  const src    = pageWarped[editIndex];
+  const curFilter = pageFilters[editIndex] || 'original';
+
+  // Generate previews at 150px wide for quality + performance balance
+  const prevW = Math.min(150, src.width);
+  const prevH = Math.round(prevW * src.height / src.width);
+
+  FILTERS.forEach(f => {
+    const prevCanvas = document.createElement('canvas');
+    prevCanvas.width = prevW; prevCanvas.height = prevH;
+    prevCanvas.getContext('2d').drawImage(src, 0, 0, prevW, prevH);
+    const filtered = applyFilter(prevCanvas, f);
+
+    const btn = document.createElement('button');
+    btn.className = 'editor-filter-opt' + (curFilter === f ? ' active' : '');
+    btn.onclick = () => editorPickFilter(f);
+
+    const img = document.createElement('img');
+    img.className = 'editor-filter-thumb';
+    img.src = filtered.toDataURL('image/jpeg', 0.75);
+
+    const label = document.createElement('span');
+    label.className = 'editor-filter-label';
+    label.textContent = FILTER_LABELS[f];
+
+    btn.append(img, label);
+    bar.appendChild(btn);
   });
 }
 
