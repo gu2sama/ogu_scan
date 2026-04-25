@@ -625,7 +625,7 @@
       <button id="flash-btn" onclick="toggleFlash()">⚡</button>
       <button id="filter-btn" onclick="cycleFilter()">カラー</button>
     </div>
-    <button id="auto-toggle" class="off" onclick="toggleAutoCapture()">手動</button>
+    <button id="auto-toggle" class="off" onclick="toggleAutoCapture()">連続</button>
   </header>
 
   <div id="camera-wrap">
@@ -749,7 +749,8 @@ let smoothedCorners = null;
 let isCapturing      = false;
 let lastCaptureTime  = 0;
 let currentFilter      = 'original';
-let autoCaptureEnabled = false;
+let autoCaptureUserPref = false;  // user's chosen mode (persists across sheet open/close)
+let autoCaptureEnabled  = false;  // runtime state (may be suppressed while sheets are open)
 let flashOn            = false;
 let cvReady            = false;
 let cvFrameCount       = 0;
@@ -1750,8 +1751,7 @@ function renderConfirmThumbs() {
 function closeConfirmSheet() {
   document.getElementById('confirm-backdrop').classList.remove('show');
   document.getElementById('confirm-sheet').classList.remove('show');
-  // Resume auto-capture
-  autoCaptureEnabled = true;
+  autoCaptureEnabled = autoCaptureUserPref;
 }
 
 async function doShare() {
@@ -1815,7 +1815,7 @@ async function doShare() {
   }
 
   saveBtn.disabled = false;
-  autoCaptureEnabled = true;
+  autoCaptureEnabled = autoCaptureUserPref;
 }
 
 function fallbackDownload(blob, name) {
@@ -2006,11 +2006,11 @@ function copyAllOcrText() {
 }
 
 function toggleAutoCapture() {
-  autoCaptureEnabled = !autoCaptureEnabled;
+  autoCaptureUserPref = !autoCaptureUserPref;
+  autoCaptureEnabled  = autoCaptureUserPref;
   const btn = document.getElementById('auto-toggle');
-  btn.textContent = autoCaptureEnabled ? 'AUTO' : '手動';
-  btn.classList.toggle('off', !autoCaptureEnabled);
-  showToast(autoCaptureEnabled ? '自動撮影 ON' : '自動撮影 OFF — シャッターで撮影');
+  btn.classList.toggle('off', !autoCaptureUserPref);
+  showToast(autoCaptureUserPref ? '連続撮影 ON' : '連続撮影 OFF');
 }
 // ============================================================
 // Overlay drawing
@@ -2129,7 +2129,7 @@ function closeEditor() {
   editIndex   = -1;
   editMode    = 'none';
   editHandles = [];
-  autoCaptureEnabled = true;
+  autoCaptureEnabled = autoCaptureUserPref;
 
   const ec = document.getElementById('editor-canvas');
   ec.removeEventListener('touchstart', _edTouchStart);
