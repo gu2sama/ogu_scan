@@ -80,6 +80,53 @@
       color: var(--muted);
     }
 
+    #header-center {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    #header-right {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    #flash-btn {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.08);
+      border: none;
+      color: rgba(255,255,255,0.6);
+      font-size: 17px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.2s, color 0.2s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #flash-btn.on {
+      background: rgba(255,220,0,0.2);
+      color: #ffd700;
+    }
+
+    #filter-btn {
+      padding: 4px 12px;
+      border-radius: 14px;
+      border: 1.5px solid rgba(255,255,255,0.3);
+      background: rgba(255,255,255,0.08);
+      color: rgba(255,255,255,0.85);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    #filter-btn:active { background: rgba(255,255,255,0.18); }
+
     /* Camera view — full screen */
     #camera-wrap {
       position: absolute;
@@ -473,8 +520,14 @@
 <div id="app">
   <header id="header">
     <div id="logo">ogu<span>_scan</span></div>
-    <button id="auto-toggle" onclick="toggleAutoCapture()">AUTO</button>
-    <div id="page-count">0 ページ</div>
+    <div id="header-center">
+      <button id="flash-btn" onclick="toggleFlash()">⚡</button>
+      <button id="filter-btn" onclick="cycleFilter()">カラー</button>
+    </div>
+    <div id="header-right">
+      <button id="auto-toggle" onclick="toggleAutoCapture()">AUTO</button>
+      <div id="page-count">0 ページ</div>
+    </div>
   </header>
 
   <div id="camera-wrap">
@@ -544,6 +597,8 @@ const CAPTURE_MAX_W    = 2000; // max width for warp canvas
 const DETECT_W         = 80;   // detection resolution
 const STABLE_THRESHOLD = 25;   // ~0.8s at 30fps
 const CAPTURE_COOLDOWN = 5000; // ms between auto-captures
+const FILTERS       = ['original', 'enhance', 'bw'];
+const FILTER_LABELS = { original: 'カラー', enhance: '文書', bw: '白黒' };
 
 // ============================================================
 // State
@@ -556,8 +611,9 @@ let lastCorners     = null;
 let smoothedCorners = null;
 let isCapturing      = false;
 let lastCaptureTime  = 0;
-const currentFilter = 'enhance';
+let currentFilter   = 'original';
 let autoCaptureEnabled = true;
+let flashOn         = false;
 let toastTimer;
 
 // ============================================================
@@ -1464,6 +1520,8 @@ function buildFileName() {
 function showConfirmSheet() {
   if (!pages.length) return;
   closePreview();
+  // Pause auto-capture while confirm sheet is open
+  autoCaptureEnabled = false;
 
   // Populate thumbnails
   const thumbs = document.getElementById('confirm-thumbs');
@@ -1482,6 +1540,8 @@ function showConfirmSheet() {
 function closeConfirmSheet() {
   document.getElementById('confirm-backdrop').classList.remove('show');
   document.getElementById('confirm-sheet').classList.remove('show');
+  // Resume auto-capture
+  autoCaptureEnabled = true;
 }
 
 async function doShare() {
@@ -1552,6 +1612,25 @@ function fallbackDownload(blob, name) {
   a.href = url; a.download = name; a.click();
   URL.revokeObjectURL(url);
   showToast('PDF を保存しました');
+}
+
+function cycleFilter() {
+  const idx = FILTERS.indexOf(currentFilter);
+  currentFilter = FILTERS[(idx + 1) % FILTERS.length];
+  document.getElementById('filter-btn').textContent = FILTER_LABELS[currentFilter];
+}
+
+async function toggleFlash() {
+  if (!stream) return;
+  flashOn = !flashOn;
+  try {
+    const track = stream.getVideoTracks()[0];
+    await track.applyConstraints({ advanced: [{ torch: flashOn }] });
+    document.getElementById('flash-btn').classList.toggle('on', flashOn);
+  } catch (e) {
+    flashOn = false;
+    showToast('フラッシュ非対応');
+  }
 }
 
 function toggleAutoCapture() {
