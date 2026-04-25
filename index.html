@@ -419,7 +419,8 @@ const STABLE_THRESHOLD = 15;   // frames (~0.5s @30fps)
 const STABLE_MOVE_MAX  = 12;   // px (in process space)
 const PROCESS_W        = 640;  // processing resolution width
 const CAPTURE_MAX_W    = 1100; // max width for warp canvas
-const EDGE_THRESHOLD   = 30;   // applied after blur — boundary-only detection
+const EDGE_THRESHOLD   = 20;   // tiny canvas = natural blur, threshold can be low
+const DETECT_W         = 80;   // detection resolution — text vanishes, boundary survives
 const FILTERS = ['original', 'enhance', 'bw'];
 const FILTER_LABEL = { original: 'オリジナル', enhance: '文書強調', bw: '白黒' };
 const FILTER_BTN_TEXT = { original: 'AUTO', enhance: 'DOC', bw: 'B&W' };
@@ -455,9 +456,13 @@ const filterLabel    = document.getElementById('filter-label');
 const permError      = document.getElementById('permission-error');
 const loadingEl      = document.getElementById('loading');
 
-// Persistent process canvas (reused each frame)
+// Persistent canvases (reused each frame)
 const processCanvas = document.createElement('canvas');
 const pctx = processCanvas.getContext('2d', { willReadFrequently: true });
+
+// Tiny detection canvas — extreme downscale kills text, keeps document boundary
+const tinyCanvas = document.createElement('canvas');
+const tctx = tinyCanvas.getContext('2d', { willReadFrequently: true });
 
 // ============================================================
 // Init & camera
@@ -513,9 +518,26 @@ function loop() {
     processCanvas.height = ph;
   }
   pctx.drawImage(video, 0, 0, pw, ph);
-  const imageData = pctx.getImageData(0, 0, pw, ph);
 
-  const result = detectDocument(imageData.data, pw, ph);
+  // Draw to tiny canvas for detection (80px wide)
+  const tw = DETECT_W;
+  const th = Math.round(tw * ph / pw);
+  if (tinyCanvas.width !== tw || tinyCanvas.height !== th) {
+    tinyCanvas.width = tw;
+    tinyCanvas.height = th;
+  }
+  tctx.drawImage(processCanvas, 0, 0, tw, th);
+  const tinyData = tctx.getImageData(0, 0, tw, th);
+
+  const result = detectDocument(tinyData.data, tw, th);
+
+  // Scale detected corners from tiny space back to process space
+  if (result.detected) {
+    result.corners = result.corners.map(([x, y]) => [
+      x * pw / tw,
+      y * ph / th
+    ]);
+  }
 
   if (result.detected) {
     // EMA smoothing: blend new corners with history to reduce jitter
@@ -598,10 +620,7 @@ function detectDocument(data, w, h) {
     gray[i] = (data[i*4] * 77 + data[i*4+1] * 150 + data[i*4+2] * 29) >> 8;
   }
 
-  // Two-pass box blur: suppresses text/fine detail, preserves document boundary
-  const blurred = boxBlur(boxBlur(gray, w, h), w, h);
-
-  // Sobel on blurred image — should only fire at document boundary
+  // Sobel directly on tiny grayscale — no blur needed (downscale already kills text)
   const edges = new Uint8Array(w * h);
   let edgeCount = 0;
   let minX = w, maxX = 0, minY = h, maxY = 0;
@@ -609,13 +628,12 @@ function detectDocument(data, w, h) {
   for (let y = 1; y < h - 1; y++) {
     for (let x = 1; x < w - 1; x++) {
       const i = y * w + x;
-      const gx = -blurred[i-w-1] + blurred[i-w+1]
-                 - 2*blurred[i-1] + 2*blurred[i+1]
-                 - blurred[i+w-1] + blurred[i+w+1];
-      const gy = -blurred[i-w-1] - 2*blurred[i-w] - blurred[i-w+1]
-                 + blurred[i+w-1] + 2*blurred[i+w] + blurred[i+w+1];
-      const mag = Math.sqrt(gx*gx + gy*gy);
-      if (mag > EDGE_THRESHOLD) {
+      const gx = -gray[i-w-1] + gray[i-w+1]
+                 - 2*gray[i-1] + 2*gray[i+1]
+                 - gray[i+w-1] + gray[i+w+1];
+      const gy = -gray[i-w-1] - 2*gray[i-w] - gray[i-w+1]
+                 + gray[i+w-1] + 2*gray[i+w] + gray[i+w+1];
+      if (Math.sqrt(gx*gx + gy*gy) > EDGE_THRESHOLD) {
         edges[i] = 1;
         edgeCount++;
         if (x < minX) minX = x;
@@ -631,28 +649,12 @@ function detectDocument(data, w, h) {
   const relArea  = (regionW * regionH) / (w * h);
   const edgeDens = edgeCount / (w * h);
 
-  // Looser thresholds — blurred image produces far fewer edge pixels
-  if (relArea  < 0.08 || relArea  > 0.98) return { detected: false };
-  if (edgeDens < 0.001 || edgeDens > 0.08) return { detected: false };
-  if (regionW  < 60   || regionH  < 60)    return { detected: false };
+  if (relArea  < 0.06 || relArea  > 0.99) return { detected: false };
+  if (edgeDens < 0.005 || edgeDens > 0.25) return { detected: false };
+  if (regionW  < 5    || regionH  < 5)     return { detected: false };
 
   const corners = findCorners(edges, w, h, minX, maxX, minY, maxY);
   return { detected: true, corners };
-}
-
-// 3x3 box blur (integer arithmetic for speed)
-function boxBlur(src, w, h) {
-  const dst = new Uint8Array(w * h);
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const i = y * w + x;
-      dst[i] = (src[i-w-1] + src[i-w] + src[i-w+1] +
-                src[i-1]   + src[i]   + src[i+1]   +
-                src[i+w-1] + src[i+w] + src[i+w+1]) / 9 | 0;
-    }
-  }
-  return dst;
-}
 
 // Find 4 document corners using extreme-point scoring
 // with outlier filtering based on distance from centroid
