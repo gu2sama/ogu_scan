@@ -140,29 +140,6 @@
       pointer-events: none;
     }
 
-    /* Status pill */
-    #status {
-      position: absolute;
-      top: 14px;
-      left: 50%;
-      transform: translateX(-50%);
-      font-size: 12px;
-      font-weight: 500;
-      color: var(--muted);
-      background: rgba(10,10,11,0.72);
-      backdrop-filter: blur(8px);
-      -webkit-backdrop-filter: blur(8px);
-      padding: 5px 14px;
-      border-radius: 20px;
-      white-space: nowrap;
-      transition: color 0.2s, background 0.2s;
-      pointer-events: none;
-    }
-
-    #status.detecting { color: var(--accent); }
-    #status.stable    { color: var(--accent); font-weight: 600; }
-    #status.captured  { color: #0a0a0b; background: var(--accent); font-weight: 600; }
-
     /* Countdown ring */
     #countdown-wrap {
       position: absolute;
@@ -559,7 +536,6 @@
     <div id="loading" style="display:none">カメラを起動中...</div>
     <video id="video" autoplay playsinline muted></video>
     <canvas id="overlay"></canvas>
-    <div id="status">書類を探しています...</div>
     <div id="countdown-wrap">
       <svg id="countdown-svg" width="52" height="52" viewBox="0 0 52 52">
         <circle id="countdown-track" cx="26" cy="26" r="21"/>
@@ -644,7 +620,6 @@ let toastTimer;
 const video          = document.getElementById('video');
 const overlay        = document.getElementById('overlay');
 const octx           = overlay.getContext('2d');
-const statusEl       = document.getElementById('status');
 const countdownWrap  = document.getElementById('countdown-wrap');
 const countdownRing  = document.getElementById('countdown-ring');
 const flashEl        = document.getElementById('flash');
@@ -1729,16 +1704,7 @@ function drawOverlay(corners, stable) {
 // ============================================================
 // UI helpers
 // ============================================================
-function setStatus(state) {
-  const labels = {
-    searching: '書類を探しています...',
-    detecting: '書類を検出中',
-    stable:    '静止してください — 自動撮影します',
-    captured:  'キャプチャ完了！'
-  };
-  statusEl.textContent = labels[state] || '';
-  statusEl.className   = state;
-}
+function setStatus(_state) { /* status pill removed — overlay communicates state visually */ }
 
 function setCountdown(progress) {
   const circ = 132;
