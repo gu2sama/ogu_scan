@@ -549,6 +549,72 @@
       opacity: 1;
       transform: translateX(-50%) translateY(0);
     }
+
+    /* Page Editor sheet */
+    #editor-sheet {
+      position: fixed; inset: 0;
+      background: #0a0a0b; z-index: 80;
+      display: flex; flex-direction: column;
+      transform: translateY(100%);
+      transition: transform 0.32s cubic-bezier(0.32,0.72,0,1);
+    }
+    #editor-sheet.show { transform: translateY(0); }
+    #editor-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 20px;
+      padding-top: calc(14px + env(safe-area-inset-top));
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      flex-shrink: 0;
+    }
+    #editor-header span { font-size: 15px; font-weight: 600; }
+    .editor-hdr-btn {
+      font-size: 15px; background: none; border: none;
+      color: var(--accent); cursor: pointer; padding: 6px;
+      min-width: 64px; -webkit-tap-highlight-color: transparent;
+    }
+    .editor-hdr-btn:last-child { text-align: right; }
+    #editor-canvas-wrap {
+      flex: 1; display: flex; align-items: center; justify-content: center;
+      overflow: hidden; position: relative; background: #111;
+    }
+    #editor-canvas { display: block; touch-action: none; }
+    #editor-toolbar {
+      display: flex; justify-content: space-around; align-items: center;
+      padding: 12px 8px;
+      padding-bottom: calc(12px + env(safe-area-inset-bottom));
+      border-top: 1px solid rgba(255,255,255,0.08); flex-shrink: 0;
+      background: #0a0a0b;
+    }
+    .editor-tool-btn {
+      display: flex; flex-direction: column; align-items: center; gap: 4px;
+      background: none; border: none; color: var(--text);
+      font-size: 11px; font-weight: 600; cursor: pointer; padding: 6px 16px;
+      -webkit-tap-highlight-color: transparent; border-radius: 10px;
+      transition: background 0.15s;
+    }
+    .editor-tool-btn .eicon { font-size: 22px; line-height: 1; }
+    .editor-tool-btn.active { color: var(--accent); background: rgba(0,229,160,0.1); }
+    .editor-tool-btn.danger { color: var(--danger); }
+    .editor-tool-btn:active { opacity: 0.7; }
+    #editor-filter-bar {
+      position: absolute; bottom: 0; left: 0; right: 0;
+      display: none; justify-content: center; gap: 10px;
+      padding: 14px 16px;
+      background: rgba(10,10,11,0.95);
+      border-top: 1px solid rgba(255,255,255,0.08);
+    }
+    #editor-filter-bar.show { display: flex; }
+    .editor-filter-opt {
+      padding: 8px 20px; border-radius: 20px;
+      border: 1.5px solid rgba(255,255,255,0.2);
+      background: rgba(255,255,255,0.06);
+      color: var(--text); font-size: 13px; font-weight: 600;
+      cursor: pointer; -webkit-tap-highlight-color: transparent;
+    }
+    .editor-filter-opt.active {
+      border-color: var(--accent); color: var(--accent);
+      background: rgba(0,229,160,0.12);
+    }
   </style>
 </head>
 <body>
@@ -619,6 +685,37 @@
   </div>
 </div>
 
+<!-- Page Editor sheet -->
+<div id="editor-sheet">
+  <div id="editor-header">
+    <button class="editor-hdr-btn" onclick="closeEditor()">完了</button>
+    <span id="editor-title"></span>
+    <button class="editor-hdr-btn" onclick="retakeEditor()">再撮影</button>
+  </div>
+  <div id="editor-canvas-wrap">
+    <canvas id="editor-canvas"></canvas>
+    <div id="editor-filter-bar">
+      <button class="editor-filter-opt" data-filter="original" onclick="editorPickFilter('original')">カラー</button>
+      <button class="editor-filter-opt" data-filter="enhance"  onclick="editorPickFilter('enhance')">文書</button>
+      <button class="editor-filter-opt" data-filter="bw"       onclick="editorPickFilter('bw')">白黒</button>
+    </div>
+  </div>
+  <div id="editor-toolbar">
+    <button class="editor-tool-btn" id="editor-btn-adjust" onclick="editorSetMode('adjust')">
+      <span class="eicon">⊹</span>調整
+    </button>
+    <button class="editor-tool-btn" id="editor-btn-filter" onclick="editorSetMode('filter')">
+      <span class="eicon">&#127912;</span>フィルタ
+    </button>
+    <button class="editor-tool-btn" onclick="editorRotate()">
+      <span class="eicon">&#8635;</span>回転
+    </button>
+    <button class="editor-tool-btn danger" onclick="editorDelete()">
+      <span class="eicon">&#128465;</span>削除
+    </button>
+  </div>
+</div>
+
 <script>
 // Global error display for debugging
 window.onerror = function(msg, src, line) {
@@ -659,6 +756,16 @@ let cvFrameCount       = 0;
 let lastCvCorners      = null; // { corners, pw, ph }
 let tessWorker         = null;
 let toastTimer;
+let pageWarped  = [];   // canvas after warp, before filter (for re-filtering)
+let pageSrcs    = [];   // { canvas, corners } — original capture + detected corners (for 調整)
+let pageFilters = [];   // active filter per page
+
+// Editor state
+let editIndex   = -1;
+let editMode    = 'none';
+let editHandles = [];   // [[x,y]×4] in editor-canvas display px
+let editDragIdx = -1;
+let _edScale    = 1;    // srcCanvas px → editor-canvas display px
 
 // ============================================================
 // DOM refs
@@ -1214,7 +1321,7 @@ async function captureDocument(corners, pw, ph, vw, vh) {
   const warped = warpPerspective(srcCanvas, H, outW, outH);
   const filtered = applyFilter(warped, currentFilter);
 
-  addPage(filtered);
+  addPage(filtered, warped, { canvas: srcCanvas, corners: scaledCorners }, currentFilter);
   setStatus('captured');
   setTimeout(() => setStatus('searching'), 1200);
   isCapturing = false;
@@ -1250,9 +1357,9 @@ async function manualCapture() {
     const outH = Math.round(Math.max(dist(tl, bl), dist(tr, br)));
     const H = computeHomography(scaledCorners, [[0,0],[outW,0],[outW,outH],[0,outH]]);
     const warped = warpPerspective(srcCanvas, H, outW, outH);
-    addPage(applyFilter(warped, currentFilter));
+    addPage(applyFilter(warped, currentFilter), warped, { canvas: srcCanvas, corners: scaledCorners }, currentFilter);
   } else {
-    addPage(applyFilter(srcCanvas, currentFilter));
+    addPage(applyFilter(srcCanvas, currentFilter), srcCanvas, null, currentFilter);
   }
 
   isCapturing = false;
@@ -1524,8 +1631,11 @@ function applyFilter(canvas, filter) {
 // ============================================================
 // Page management
 // ============================================================
-function addPage(canvas) {
+function addPage(canvas, warped, srcData, filter) {
   pages.push(canvas);
+  pageWarped.push(warped  || canvas);
+  pageSrcs.push(srcData   || null);
+  pageFilters.push(filter || 'original');
   renderThumbs();
   updatePageCount();
   saveBtn.disabled = false;
@@ -1547,6 +1657,7 @@ function renderThumbs() {
   pages.forEach((canvas, i) => {
     const wrap = document.createElement('div');
     wrap.className = 'thumb';
+    wrap.onclick = () => openEditor(i);
 
     const img = document.createElement('img');
     img.src = canvas.toDataURL('image/jpeg', 0.65);
@@ -1564,6 +1675,9 @@ function renderThumbs() {
 
 function deletePage(i) {
   pages.splice(i, 1);
+  pageWarped.splice(i, 1);
+  pageSrcs.splice(i, 1);
+  pageFilters.splice(i, 1);
   renderThumbs();
   updatePageCount();
   if (pages.length === 0) {
@@ -1618,9 +1732,7 @@ function renderConfirmThumbs() {
     del.className = 'confirm-thumb-del';
     del.textContent = '×';
     del.onclick = () => {
-      pages.splice(i, 1);
-      renderThumbs();
-      updatePageCount();
+      deletePage(i);
       if (!pages.length) { closeConfirmSheet(); return; }
       renderConfirmThumbs();
       document.getElementById('confirm-filename').textContent = buildFileName();
@@ -1971,6 +2083,276 @@ function avgDist(a, b) {
 }
 
 // startCamera is called via onclick on the button
+
+// ============================================================
+// Page Editor
+// ============================================================
+function openEditor(i) {
+  editIndex   = i;
+  editMode    = 'none';
+  editHandles = [];
+  editDragIdx = -1;
+  autoCaptureEnabled = false;
+
+  document.getElementById('editor-title').textContent = `ページ ${i + 1}`;
+  document.getElementById('editor-btn-adjust').classList.remove('active');
+  document.getElementById('editor-btn-filter').classList.remove('active');
+  document.getElementById('editor-filter-bar').classList.remove('show');
+  document.getElementById('editor-sheet').classList.add('show');
+
+  _drawEditorPage();
+
+  const ec = document.getElementById('editor-canvas');
+  ec.addEventListener('touchstart', _edTouchStart, { passive: false });
+  ec.addEventListener('touchmove',  _edTouchMove,  { passive: false });
+  ec.addEventListener('touchend',   _edTouchEnd,   { passive: false });
+  ec.addEventListener('mousedown',  _edMouseDown);
+  document.addEventListener('mousemove', _edMouseMove);
+  document.addEventListener('mouseup',   _edMouseUp);
+}
+
+function closeEditor() {
+  document.getElementById('editor-sheet').classList.remove('show');
+  editIndex   = -1;
+  editMode    = 'none';
+  editHandles = [];
+  autoCaptureEnabled = true;
+
+  const ec = document.getElementById('editor-canvas');
+  ec.removeEventListener('touchstart', _edTouchStart);
+  ec.removeEventListener('touchmove',  _edTouchMove);
+  ec.removeEventListener('touchend',   _edTouchEnd);
+  ec.removeEventListener('mousedown',  _edMouseDown);
+  document.removeEventListener('mousemove', _edMouseMove);
+  document.removeEventListener('mouseup',   _edMouseUp);
+}
+
+function retakeEditor() {
+  const i = editIndex;
+  closeEditor();
+  deletePage(i);
+}
+
+function editorSetMode(mode) {
+  if (editMode === mode) {
+    // Toggle off — return to normal view
+    editMode = 'none';
+    document.getElementById('editor-btn-adjust').classList.remove('active');
+    document.getElementById('editor-btn-filter').classList.remove('active');
+    document.getElementById('editor-filter-bar').classList.remove('show');
+    _drawEditorPage();
+    return;
+  }
+  editMode = mode;
+  document.getElementById('editor-btn-adjust').classList.toggle('active', mode === 'adjust');
+  document.getElementById('editor-btn-filter').classList.toggle('active', mode === 'filter');
+
+  if (mode === 'adjust') {
+    document.getElementById('editor-filter-bar').classList.remove('show');
+    _drawEditorAdjust();
+  } else {
+    _drawEditorPage();
+    _updateFilterBar();
+    document.getElementById('editor-filter-bar').classList.add('show');
+  }
+}
+
+function _drawEditorPage() {
+  if (editIndex < 0) return;
+  const canvas = pages[editIndex];
+  const ec     = document.getElementById('editor-canvas');
+  const wrap   = document.getElementById('editor-canvas-wrap');
+  const maxW   = wrap.clientWidth;
+  const maxH   = wrap.clientHeight;
+  const scale  = Math.min(maxW / canvas.width, maxH / canvas.height);
+  const dw = Math.round(canvas.width  * scale);
+  const dh = Math.round(canvas.height * scale);
+  ec.width  = dw;
+  ec.height = dh;
+  ec.style.width  = dw + 'px';
+  ec.style.height = dh + 'px';
+  ec.getContext('2d').drawImage(canvas, 0, 0, dw, dh);
+}
+
+function _drawEditorAdjust() {
+  if (editIndex < 0) return;
+  const src = pageSrcs[editIndex];
+  if (!src || !src.corners) {
+    editMode = 'none';
+    document.getElementById('editor-btn-adjust').classList.remove('active');
+    _drawEditorPage();
+    showToast('調整データがありません');
+    return;
+  }
+  const ec   = document.getElementById('editor-canvas');
+  const wrap = document.getElementById('editor-canvas-wrap');
+  const maxW = wrap.clientWidth;
+  const maxH = wrap.clientHeight;
+  const srcC = src.canvas;
+  _edScale   = Math.min(maxW / srcC.width, maxH / srcC.height);
+  const dw   = Math.round(srcC.width  * _edScale);
+  const dh   = Math.round(srcC.height * _edScale);
+  ec.width   = dw;
+  ec.height  = dh;
+  ec.style.width  = dw + 'px';
+  ec.style.height = dh + 'px';
+  editHandles = src.corners.map(([x, y]) => [x * _edScale, y * _edScale]);
+  _redrawAdjust(srcC);
+}
+
+function _redrawAdjust(srcCanvas) {
+  const ec  = document.getElementById('editor-canvas');
+  const ctx = ec.getContext('2d');
+  ctx.clearRect(0, 0, ec.width, ec.height);
+  ctx.globalAlpha = 0.72;
+  ctx.drawImage(srcCanvas, 0, 0, ec.width, ec.height);
+  ctx.globalAlpha = 1;
+
+  const [tl, tr, br, bl] = editHandles;
+  ctx.beginPath();
+  ctx.moveTo(...tl); ctx.lineTo(...tr);
+  ctx.lineTo(...br); ctx.lineTo(...bl);
+  ctx.closePath();
+  ctx.fillStyle   = 'rgba(0,229,160,0.18)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,229,160,0.9)';
+  ctx.lineWidth   = 2;
+  ctx.setLineDash([]);
+  ctx.stroke();
+
+  const R = 20;
+  editHandles.forEach(([x, y]) => {
+    ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(0,229,160,0.9)'; ctx.fill();
+    ctx.beginPath(); ctx.arc(x, y, R - 4, 0, Math.PI*2);
+    ctx.fillStyle = '#0a0a0b'; ctx.fill();
+    ctx.beginPath(); ctx.arc(x, y, R - 9, 0, Math.PI*2);
+    ctx.fillStyle = 'rgba(0,229,160,0.9)'; ctx.fill();
+  });
+}
+
+function _getEditorPos(e, el) {
+  const rect   = el.getBoundingClientRect();
+  const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+  const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+  return [clientX - rect.left, clientY - rect.top];
+}
+
+function _nearestHandle(x, y) {
+  let best = -1, bestD = 44;
+  editHandles.forEach(([hx, hy], i) => {
+    const d = Math.sqrt((x-hx)**2 + (y-hy)**2);
+    if (d < bestD) { bestD = d; best = i; }
+  });
+  return best;
+}
+
+function _edTouchStart(e) {
+  if (editMode !== 'adjust') return;
+  e.preventDefault();
+  editDragIdx = _nearestHandle(..._getEditorPos(e, e.currentTarget));
+}
+function _edTouchMove(e) {
+  if (editMode !== 'adjust' || editDragIdx < 0) return;
+  e.preventDefault();
+  const ec = e.currentTarget;
+  const [x, y] = _getEditorPos(e, ec);
+  editHandles[editDragIdx] = [
+    Math.max(0, Math.min(ec.width,  x)),
+    Math.max(0, Math.min(ec.height, y))
+  ];
+  const src = pageSrcs[editIndex];
+  if (src) _redrawAdjust(src.canvas);
+}
+function _edTouchEnd(e) {
+  if (editMode !== 'adjust' || editDragIdx < 0) return;
+  editDragIdx = -1;
+  _commitAdjust();
+}
+function _edMouseDown(e) {
+  if (editMode !== 'adjust') return;
+  editDragIdx = _nearestHandle(..._getEditorPos(e, e.currentTarget));
+}
+function _edMouseMove(e) {
+  if (editMode !== 'adjust' || editDragIdx < 0) return;
+  const ec = document.getElementById('editor-canvas');
+  const [x, y] = _getEditorPos(e, ec);
+  editHandles[editDragIdx] = [
+    Math.max(0, Math.min(ec.width,  x)),
+    Math.max(0, Math.min(ec.height, y))
+  ];
+  const src = pageSrcs[editIndex];
+  if (src) _redrawAdjust(src.canvas);
+}
+function _edMouseUp() {
+  if (editMode !== 'adjust' || editDragIdx < 0) return;
+  editDragIdx = -1;
+  _commitAdjust();
+}
+
+function _commitAdjust() {
+  if (editIndex < 0 || editHandles.length < 4) return;
+  const src = pageSrcs[editIndex];
+  if (!src) return;
+  const newCorners = editHandles.map(([x, y]) => [x / _edScale, y / _edScale]);
+  const [tl, tr, br, bl] = newCorners;
+  const outW = Math.round(Math.max(dist(tl, tr), dist(bl, br)));
+  const outH = Math.round(Math.max(dist(tl, bl), dist(tr, br)));
+  if (outW < 10 || outH < 10) return;
+  const H      = computeHomography(newCorners, [[0,0],[outW,0],[outW,outH],[0,outH]]);
+  const warped = warpPerspective(src.canvas, H, outW, outH);
+  const filter = pageFilters[editIndex];
+  pages[editIndex]      = applyFilter(warped, filter);
+  pageWarped[editIndex] = warped;
+  pageSrcs[editIndex]   = { canvas: src.canvas, corners: newCorners };
+  renderThumbs();
+}
+
+function editorPickFilter(filter) {
+  if (editIndex < 0) return;
+  pageFilters[editIndex] = filter;
+  pages[editIndex] = applyFilter(pageWarped[editIndex], filter);
+  _drawEditorPage();
+  renderThumbs();
+  _updateFilterBar();
+  showToast(FILTER_LABELS[filter]);
+}
+
+function _updateFilterBar() {
+  const cur = pageFilters[editIndex] || 'original';
+  document.querySelectorAll('.editor-filter-opt').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.filter === cur);
+  });
+}
+
+function editorRotate() {
+  if (editIndex < 0) return;
+  const _rot = c => {
+    const out = document.createElement('canvas');
+    out.width = c.height; out.height = c.width;
+    const ctx = out.getContext('2d');
+    ctx.translate(out.width / 2, out.height / 2);
+    ctx.rotate(Math.PI / 2);
+    ctx.drawImage(c, -c.width / 2, -c.height / 2);
+    return out;
+  };
+  pages[editIndex]      = _rot(pages[editIndex]);
+  pageWarped[editIndex] = _rot(pageWarped[editIndex]);
+  pageSrcs[editIndex]   = null;  // rotation invalidates perspective correction data
+  if (editMode === 'adjust') {
+    editMode = 'none';
+    document.getElementById('editor-btn-adjust').classList.remove('active');
+  }
+  _drawEditorPage();
+  renderThumbs();
+}
+
+function editorDelete() {
+  if (editIndex < 0) return;
+  const i = editIndex;
+  closeEditor();
+  deletePage(i);
+}
 </script>
 </body>
 </html>
