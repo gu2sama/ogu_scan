@@ -450,8 +450,8 @@ const STABLE_THRESHOLD = 15;   // frames (~0.5s @30fps)
 const STABLE_MOVE_MAX  = 12;   // px (in process space)
 const PROCESS_W        = 640;  // processing resolution width
 const CAPTURE_MAX_W    = 1100; // max width for warp canvas
-const EDGE_THRESHOLD   = 20;   // tiny canvas = natural blur, threshold can be low
-const DETECT_W         = 80;   // detection resolution — text vanishes, boundary survives
+const BRIGHT_THRESHOLD = 150;  // brightness cutoff: document (bright) vs background (dark)
+const DETECT_W         = 80;   // detection resolution
 const FILTERS = ['original', 'enhance', 'bw'];
 const FILTER_LABEL = { original: 'オリジナル', enhance: '文書強調', bw: '白黒' };
 const FILTER_BTN_TEXT = { original: 'AUTO', enhance: 'DOC', bw: 'B&W' };
@@ -649,87 +649,52 @@ function processToDisplay(px, py, pw, ph, vw, vh, dw, dh) {
 // Document detection
 // ============================================================
 function detectDocument(data, w, h) {
-  // Grayscale
-  const gray = new Uint8Array(w * h);
-  for (let i = 0; i < gray.length; i++) {
-    gray[i] = (data[i*4] * 77 + data[i*4+1] * 150 + data[i*4+2] * 29) >> 8;
-  }
-
-  // Sobel directly on tiny grayscale — no blur needed (downscale already kills text)
-  const edges = new Uint8Array(w * h);
-  let edgeCount = 0;
+  // Brightness-based detection: white paper > background
+  const mask = new Uint8Array(w * h);
+  let brightCount = 0;
   let minX = w, maxX = 0, minY = h, maxY = 0;
 
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const i = y * w + x;
-      const gx = -gray[i-w-1] + gray[i-w+1]
-                 - 2*gray[i-1] + 2*gray[i+1]
-                 - gray[i+w-1] + gray[i+w+1];
-      const gy = -gray[i-w-1] - 2*gray[i-w] - gray[i-w+1]
-                 + gray[i+w-1] + 2*gray[i+w] + gray[i+w+1];
-      if (Math.sqrt(gx*gx + gy*gy) > EDGE_THRESHOLD) {
-        edges[i] = 1;
-        edgeCount++;
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
-      }
+  for (let i = 0; i < w * h; i++) {
+    const lum = (data[i*4] * 77 + data[i*4+1] * 150 + data[i*4+2] * 29) >> 8;
+    if (lum > BRIGHT_THRESHOLD) {
+      mask[i] = 1;
+      brightCount++;
+      const x = i % w, y = i / w | 0;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
     }
   }
 
+  const brightRatio = brightCount / (w * h);
   const regionW = maxX - minX;
   const regionH = maxY - minY;
   const relArea  = (regionW * regionH) / (w * h);
-  const edgeDens = edgeCount / (w * h);
 
-  if (relArea  < 0.06 || relArea  > 0.99) return { detected: false };
-  if (edgeDens < 0.005 || edgeDens > 0.25) return { detected: false };
-  if (regionW  < 5    || regionH  < 5)     return { detected: false };
+  // Document = significant bright region, not filling entire frame
+  if (brightRatio < 0.05 || brightRatio > 0.88) return { detected: false };
+  if (relArea     < 0.08 || relArea     > 0.98) return { detected: false };
+  if (regionW < 5 || regionH < 5)               return { detected: false };
 
-  const corners = findCorners(edges, w, h, minX, maxX, minY, maxY);
+  const corners = findCorners(mask, w, h, minX, maxX, minY, maxY);
   return { detected: true, corners };
 }
 
-// Find 4 document corners using extreme-point scoring
-// with outlier filtering based on distance from centroid
-function findCorners(edges, w, h, minX, maxX, minY, maxY) {
-  // Collect all edge pixels in the bounding region
-  const pts = [];
-  for (let y = Math.max(1, minY); y <= Math.min(h-2, maxY); y++) {
-    for (let x = Math.max(1, minX); x <= Math.min(w-2, maxX); x++) {
-      if (edges[y * w + x]) pts.push([x, y]);
-    }
-  }
-
-  if (pts.length < 8) {
-    return [[minX,minY],[maxX,minY],[maxX,maxY],[minX,maxY]];
-  }
-
-  // Compute centroid
-  const cx = pts.reduce((s,[x]) => s + x, 0) / pts.length;
-  const cy = pts.reduce((s,[,y]) => s + y, 0) / pts.length;
-
-  // Remove outliers farther than 2x the mean distance from centroid
-  const dists = pts.map(([x,y]) => Math.sqrt((x-cx)**2 + (y-cy)**2));
-  const meanD = dists.reduce((s,d) => s + d, 0) / dists.length;
-  const filtered = pts.filter((_, i) => dists[i] < meanD * 2.2);
-
-  if (filtered.length < 8) {
-    return [[minX,minY],[maxX,minY],[maxX,maxY],[minX,maxY]];
-  }
-
-  // Extreme-point scoring on filtered set
+// Find 4 document corners using extreme-point scoring on bright-pixel mask
+function findCorners(mask, w, h, minX, maxX, minY, maxY) {
   let tl = null, tr = null, bl = null, br = null;
   let tlS = Infinity, trS = -Infinity, blS = Infinity, brS = -Infinity;
 
-  for (const [x, y] of filtered) {
-    const s1 = x + y, s2 = x - y;
-    if (s1 < tlS) { tlS = s1; tl = [x, y]; }
-    if (s1 > brS) { brS = s1; br = [x, y]; }
-    if (s2 > trS) { trS = s2; tr = [x, y]; }
-    if (s2 < blS) { blS = s2; bl = [x, y]; }
+  for (let y = Math.max(0, minY); y <= Math.min(h-1, maxY); y++) {
+    for (let x = Math.max(0, minX); x <= Math.min(w-1, maxX); x++) {
+      if (!mask[y * w + x]) continue;
+      const s1 = x + y, s2 = x - y;
+      if (s1 < tlS) { tlS = s1; tl = [x, y]; }
+      if (s1 > brS) { brS = s1; br = [x, y]; }
+      if (s2 > trS) { trS = s2; tr = [x, y]; }
+      if (s2 < blS) { blS = s2; bl = [x, y]; }
+    }
   }
 
   return [
