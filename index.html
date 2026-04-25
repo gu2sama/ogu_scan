@@ -173,6 +173,32 @@
       padding: 32px;
     }
 
+    #start-screen {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--bg);
+      cursor: pointer;
+      z-index: 30;
+    }
+
+    #start-inner {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+    }
+
+    #start-icon { font-size: 56px; }
+
+    #start-label {
+      font-size: 17px;
+      font-weight: 600;
+      color: var(--text);
+    }
+
     #loading { color: var(--muted); font-size: 14px; }
     #permission-error { display: none; }
     #permission-error.show { display: flex; }
@@ -379,7 +405,13 @@
   </header>
 
   <div id="camera-wrap">
-    <div id="loading">カメラを起動中...</div>
+    <div id="start-screen" onclick="startCamera()">
+      <div id="start-inner">
+        <div id="start-icon">📄</div>
+        <div id="start-label">タップしてスキャン開始</div>
+      </div>
+    </div>
+    <div id="loading" style="display:none">カメラを起動中...</div>
     <video id="video" autoplay playsinline muted></video>
     <canvas id="overlay"></canvas>
     <div id="status">書類を探しています...</div>
@@ -467,8 +499,8 @@ const tctx = tinyCanvas.getContext('2d', { willReadFrequently: true });
 // ============================================================
 // Init & camera
 // ============================================================
-async function init() {
-  permError.classList.remove('show');
+async function startCamera() {
+  document.getElementById('start-screen').style.display = 'none';
   loadingEl.style.display = 'flex';
   try {
     if (stream) stream.getTracks().forEach(t => t.stop());
@@ -481,19 +513,19 @@ async function init() {
       audio: false
     });
     video.srcObject = stream;
-    video.play().catch(() => {});
-    await new Promise(resolve => {
-      if (video.readyState >= 2) { resolve(); return; }
-      video.addEventListener('canplay', resolve, { once: true });
-    });
+    // play() inside user gesture = always succeeds on iOS
+    await video.play();
     loadingEl.style.display = 'none';
     if (animId) cancelAnimationFrame(animId);
     loop();
-  } catch {
+  } catch (e) {
     loadingEl.style.display = 'none';
     permError.classList.add('show');
   }
 }
+
+// Keep init() for retry button
+function init() { startCamera(); }
 
 // ============================================================
 // Main detection loop
@@ -1116,10 +1148,7 @@ function avgDist(a, b) {
   return a.reduce((s, p, i) => s + dist(p, b[i]), 0) / a.length;
 }
 
-// ============================================================
-// Start
-// ============================================================
-init();
+// Start screen shown by default — camera starts on tap
 </script>
 </body>
 </html>
