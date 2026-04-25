@@ -453,7 +453,6 @@
 
 <div id="toast"></div>
 
-<script src="jspdf.min.js"></script>
 <script>
 // Global error display for debugging
 window.onerror = function(msg, src, line) {
@@ -1185,8 +1184,9 @@ function estimateBackground(canvas) {
 
   // Box-blur on tiny image (very fast at this size)
   const imgData = sctx.getImageData(0, 0, sw, sh);
-  boxBlurRGBA(imgData, sw, sh, 3);
-  boxBlurRGBA(imgData, sw, sh, 3); // 2nd pass for smoother result
+  boxBlurRGBA(imgData, sw, sh, 6);
+  boxBlurRGBA(imgData, sw, sh, 6);
+  boxBlurRGBA(imgData, sw, sh, 6); // 3rd pass — captures large shadows/gradients
   sctx.putImageData(imgData, 0, 0);
 
   // Upscale back — bilinear interpolation smooths further
@@ -1271,8 +1271,6 @@ function applyFilter(canvas, filter) {
   if (filter === 'original') return canvas;
 
   const w = canvas.width, h = canvas.height;
-
-  // Background estimation for lighting normalization
   const bgCanvas = estimateBackground(canvas);
 
   const out = document.createElement('canvas');
@@ -1282,29 +1280,45 @@ function applyFilter(canvas, filter) {
   const srcImg = ctx.getImageData(0, 0, w, h);
   const bgImg  = bgCanvas.getContext('2d').getImageData(0, 0, w, h);
   const s = srcImg.data, bg = bgImg.data;
+  const pixels = w * h;
 
-  for (let i = 0; i < s.length; i += 4) {
+  // Pass 1: background division → normalized values + histogram
+  const norm = new Uint8ClampedArray(pixels);
+  const hist = new Int32Array(256);
+  for (let i = 0, p = 0; i < s.length; i += 4, p++) {
     const lum   = (s[i]*77 + s[i+1]*150 + s[i+2]*29) >> 8;
     const bgLum = Math.max(1, (bg[i]*77 + bg[i+1]*150 + bg[i+2]*29) >> 8);
+    const n = Math.min(255, (lum / bgLum * 250) | 0);
+    norm[p] = n;
+    hist[n]++;
+  }
 
-    // Background division — removes uneven lighting & shadows
-    const n = Math.min(255, (lum / bgLum) * 240);
+  // Adaptive percentile stretch: find 1st and 97th percentile
+  let lo = 0, hi = 255, cumul = 0;
+  const p1target  = pixels * 0.01;
+  const p97target = pixels * 0.97;
+  for (let v = 0; v < 256; v++) {
+    cumul += hist[v];
+    if (cumul < p1target)  lo = v;
+    if (cumul < p97target) hi = v;
+  }
+  const range = Math.max(1, hi - lo);
 
+  // Pass 2: stretch + S-curve
+  for (let i = 0, p = 0; i < s.length; i += 4, p++) {
+    let t = Math.min(1, Math.max(0, (norm[p] - lo) / range));
     if (filter === 'enhance') {
-      // Contrast S-curve: paper→white, ink→solid dark
-      let t = n / 255;
-      t = Math.min(1, Math.max(0, 0.5 + (t - 0.5) * 2.2));
-      t = Math.pow(t, 0.6); // gamma lift → pushes paper to clean white
+      // S-curve: paper→white, ink→black
+      t = Math.min(1, Math.max(0, 0.5 + (t - 0.5) * 2.8));
+      t = Math.pow(t, 0.5); // gamma lift — pushes remaining gray to clean white
       s[i] = s[i+1] = s[i+2] = (t * 255 + 0.5) | 0;
     } else {
-      // B&W binary threshold (also benefits from background normalization)
-      s[i] = s[i+1] = s[i+2] = n > 155 ? 255 : 0;
+      s[i] = s[i+1] = s[i+2] = t > 0.52 ? 255 : 0;
     }
   }
   ctx.putImageData(srcImg, 0, 0);
 
-  // Sharpen enhance result for crisp text edges
-  return filter === 'enhance' ? sharpenCanvas(out, 0.55) : out;
+  return filter === 'enhance' ? sharpenCanvas(out, 0.65) : out;
 }
 
 // ============================================================
@@ -1369,6 +1383,17 @@ async function generateAndShare() {
   showToast('PDF 生成中...');
 
   await new Promise(r => setTimeout(r, 30));
+
+  // Lazy-load jsPDF on first use (364KB — skipped on initial page load)
+  if (!window.jspdf) {
+    await new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'jspdf.min.js';
+      s.onload = resolve;
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
 
   const { jsPDF } = window.jspdf;
   let doc = null;
