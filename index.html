@@ -59,6 +59,27 @@
       color: rgba(255,255,255,0.6);
     }
 
+    /* Auto-capture toggle */
+    #auto-toggle {
+      padding: 4px 12px;
+      border-radius: 14px;
+      border: 1.5px solid var(--accent);
+      background: rgba(0,229,160,0.15);
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+      transition: background 0.2s, border-color 0.2s, color 0.2s;
+    }
+
+    #auto-toggle.off {
+      border-color: var(--muted);
+      background: rgba(255,255,255,0.06);
+      color: var(--muted);
+    }
+
     /* Camera view — full screen */
     #camera-wrap {
       position: absolute;
@@ -392,6 +413,7 @@
 <div id="app">
   <header id="header">
     <div id="logo">ogu<span>_scan</span></div>
+    <button id="auto-toggle" onclick="toggleAutoCapture()">AUTO</button>
     <div id="page-count">0 ページ</div>
   </header>
 
@@ -444,12 +466,12 @@ window.onerror = function(msg, src, line) {
 // ============================================================
 // Constants
 // ============================================================
-const STABLE_MOVE_MAX  = 20;   // px (in process space) — generous for handheld jitter
+const STABLE_MOVE_MAX  = 15;   // px (in process space)
 const PROCESS_W        = 640;  // processing resolution width
 const CAPTURE_MAX_W    = 2000; // max width for warp canvas
 const DETECT_W         = 80;   // detection resolution
-const STABLE_THRESHOLD = 20;   // ~0.7s at 30fps — faster trigger
-const CAPTURE_COOLDOWN = 2500; // ms between auto-captures
+const STABLE_THRESHOLD = 25;   // ~0.8s at 30fps
+const CAPTURE_COOLDOWN = 3500; // ms between auto-captures
 const FILTERS = ['original', 'enhance', 'bw'];
 const FILTER_LABEL = { original: 'オリジナル', enhance: '文書強調', bw: '白黒' };
 const FILTER_BTN_TEXT = { original: 'RAW', enhance: 'DOC', bw: 'B&W' };
@@ -466,6 +488,7 @@ let smoothedCorners = null;
 let isCapturing      = false;
 let lastCaptureTime  = 0;
 let currentFilter = 'enhance';
+let autoCaptureEnabled = true;
 let toastTimer;
 
 // ============================================================
@@ -605,7 +628,7 @@ function loop() {
     setCountdown(stableFrames / STABLE_THRESHOLD);
 
     const now = Date.now();
-    if (stable && !isCapturing &&
+    if (stable && !isCapturing && autoCaptureEnabled &&
         isValidQuad(smoothedCorners, pw, ph) &&
         now - lastCaptureTime > CAPTURE_COOLDOWN) {
       lastCaptureTime = now;
@@ -1406,6 +1429,13 @@ function cycleFilter() {
   showToast(FILTER_LABEL[currentFilter]);
 }
 
+function toggleAutoCapture() {
+  autoCaptureEnabled = !autoCaptureEnabled;
+  const btn = document.getElementById('auto-toggle');
+  btn.textContent = autoCaptureEnabled ? 'AUTO' : '手動';
+  btn.classList.toggle('off', !autoCaptureEnabled);
+  showToast(autoCaptureEnabled ? '自動撮影 ON' : '自動撮影 OFF — シャッターで撮影');
+}
 // ============================================================
 // Overlay drawing
 // ============================================================
