@@ -471,7 +471,7 @@ const PROCESS_W        = 640;  // processing resolution width
 const CAPTURE_MAX_W    = 2000; // max width for warp canvas
 const DETECT_W         = 80;   // detection resolution
 const STABLE_THRESHOLD = 25;   // ~0.8s at 30fps
-const CAPTURE_COOLDOWN = 3500; // ms between auto-captures
+const CAPTURE_COOLDOWN = 5000; // ms between auto-captures
 const FILTERS = ['original', 'enhance', 'bw'];
 const FILTER_LABEL = { original: 'オリジナル', enhance: '文書強調', bw: '白黒' };
 const FILTER_BTN_TEXT = { original: 'RAW', enhance: 'DOC', bw: 'B&W' };
@@ -1359,6 +1359,11 @@ function updatePageCount() {
 // ============================================================
 async function generateAndShare() {
   if (!pages.length) return;
+  // Stop auto-capture during sharing
+  autoCaptureEnabled = false;
+  const btn = document.getElementById('auto-toggle');
+  btn.textContent = '手動';
+  btn.classList.add('off');
   shareBtn.disabled = true;
   shareBtn.textContent = '…';
   showToast('PDF 生成中...');
