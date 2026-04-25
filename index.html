@@ -405,7 +405,7 @@
   </header>
 
   <div id="camera-wrap">
-    <div id="start-screen" onclick="startCamera()">
+    <div id="start-screen">
       <div id="start-inner">
         <div id="start-icon">📄</div>
         <div id="start-label">タップしてスキャン開始</div>
@@ -1148,7 +1148,15 @@ function avgDist(a, b) {
   return a.reduce((s, p, i) => s + dist(p, b[i]), 0) / a.length;
 }
 
-// Start screen shown by default — camera starts on tap
+// Start screen — use touchend for reliable iOS response
+const startScreen = document.getElementById('start-screen');
+startScreen.addEventListener('touchend', function(e) {
+  e.preventDefault();
+  startCamera();
+}, { once: true, passive: false });
+startScreen.addEventListener('click', function() {
+  startCamera();
+}, { once: true });
 </script>
 </body>
 </html>
