@@ -638,7 +638,7 @@
     <div id="logo">OGU-SCAN<span>β版</span></div>
     <div id="header-center">
       <button id="flash-btn" onclick="toggleFlash()">⚡</button>
-      <button id="filter-btn" onclick="cycleFilter()">なし</button>
+      <button id="filter-btn" onclick="cycleFilter()">オリジナル</button>
     </div>
     <button id="auto-toggle" class="off" onclick="toggleAutoCapture()">連続</button>
   </header>
@@ -745,8 +745,8 @@ const CAPTURE_MAX_W    = 2480; // max width for warp canvas (~300dpi A4)
 const DETECT_W         = 160;  // detection resolution
 const STABLE_SECONDS   = 0.85; // seconds of stability required before auto-capture
 const CAPTURE_COOLDOWN = 5000; // ms between auto-captures
-const FILTERS       = ['original', 'brighten', 'document', 'enhance', 'bw'];
-const FILTER_LABELS = { original: 'なし', brighten: '明るく', document: 'ドキュメント', enhance: '拡張', bw: '白黒' };
+const FILTERS       = ['original', 'color', 'document', 'enhance', 'bw'];
+const FILTER_LABELS = { original: 'オリジナル', color: 'カラー', document: '文書', enhance: '拡張', bw: '白黒' };
 
 // ============================================================
 // State
@@ -1720,57 +1720,66 @@ function applyFilter(canvas, filter) {
   if (filter === 'original') return canvas;
 
   const w = canvas.width, h = canvas.height;
-
-  // brighten: simple per-channel gamma — no background division, no blow-out
-  if (filter === 'brighten') {
-    const out = document.createElement('canvas');
-    out.width = w; out.height = h;
-    const ctx = out.getContext('2d');
-    ctx.drawImage(canvas, 0, 0);
-    const imgData = ctx.getImageData(0, 0, w, h);
-    const d = imgData.data;
-    for (let i = 0; i < d.length; i += 4) {
-      d[i]   = Math.pow(d[i]   / 255, 0.60) * 255 + 0.5 | 0;
-      d[i+1] = Math.pow(d[i+1] / 255, 0.60) * 255 + 0.5 | 0;
-      d[i+2] = Math.pow(d[i+2] / 255, 0.60) * 255 + 0.5 | 0;
-    }
-    ctx.putImageData(imgData, 0, 0);
-    return out;
-  }
-
-  const bgCanvas = estimateBackground(canvas);
-
-  // bw: adaptive local threshold — compare each pixel to local background luminance
-  if (filter === 'bw') {
-    const out = document.createElement('canvas');
-    out.width = w; out.height = h;
-    const ctx = out.getContext('2d');
-    ctx.drawImage(canvas, 0, 0);
-    const srcData = ctx.getImageData(0, 0, w, h);
-    const bgData  = bgCanvas.getContext('2d').getImageData(0, 0, w, h);
-    const s = srcData.data, bg = bgData.data;
-    for (let i = 0; i < s.length; i += 4) {
-      const lum   = (s[i]*77  + s[i+1]*150  + s[i+2]*29)  >> 8;
-      const bgLum = Math.max(30, (bg[i]*77 + bg[i+1]*150 + bg[i+2]*29) >> 8);
-      const ink = lum < bgLum * 0.75;
-      s[i] = s[i+1] = s[i+2] = ink ? 0 : 255;
-      s[i+3] = 255;
-    }
-    ctx.putImageData(srcData, 0, 0);
-    return out;
-  }
-
-  // document / enhance: background division + percentile stretch + S-curve
+  const pixels = w * h;
   const out = document.createElement('canvas');
   out.width = w; out.height = h;
   const ctx = out.getContext('2d');
   ctx.drawImage(canvas, 0, 0);
   const srcImg = ctx.getImageData(0, 0, w, h);
-  const bgImg  = bgCanvas.getContext('2d').getImageData(0, 0, w, h);
-  const s = srcImg.data, bg = bgImg.data;
-  const pixels = w * h;
+  const s = srcImg.data;
 
-  // Pass 1: background division → normalized luminance + histogram
+  const bgCanvas = estimateBackground(canvas);
+  const bgImg = bgCanvas.getContext('2d').getImageData(0, 0, w, h);
+  const bg = bgImg.data;
+
+  // color: per-channel background division — whitens paper while preserving ink color
+  if (filter === 'color') {
+    const rN = new Float32Array(pixels);
+    const gN = new Float32Array(pixels);
+    const bN = new Float32Array(pixels);
+    const rH = new Int32Array(256), gH = new Int32Array(256), bH = new Int32Array(256);
+    for (let i = 0, p = 0; i < s.length; i += 4, p++) {
+      const r = Math.min(255, s[i]   / Math.max(1, bg[i])   * 240);
+      const g = Math.min(255, s[i+1] / Math.max(1, bg[i+1]) * 240);
+      const b = Math.min(255, s[i+2] / Math.max(1, bg[i+2]) * 240);
+      rN[p] = r; gN[p] = g; bN[p] = b;
+      rH[r | 0]++; gH[g | 0]++; bH[b | 0]++;
+    }
+    function chStretch(hist) {
+      let lo = 0, hi = 255, cumul = 0;
+      const lo_t = pixels * 0.02, hi_t = pixels * 0.97;
+      for (let v = 0; v < 256; v++) {
+        cumul += hist[v];
+        if (cumul < lo_t) lo = v;
+        if (cumul < hi_t) hi = v;
+      }
+      return { lo, range: Math.max(1, hi - lo) };
+    }
+    const rS = chStretch(rH), gS = chStretch(gH), bS = chStretch(bH);
+    for (let i = 0, p = 0; i < s.length; i += 4, p++) {
+      s[i]   = Math.min(255, Math.max(0, (rN[p] - rS.lo) / rS.range * 255 + 0.5)) | 0;
+      s[i+1] = Math.min(255, Math.max(0, (gN[p] - gS.lo) / gS.range * 255 + 0.5)) | 0;
+      s[i+2] = Math.min(255, Math.max(0, (bN[p] - bS.lo) / bS.range * 255 + 0.5)) | 0;
+    }
+    ctx.putImageData(srcImg, 0, 0);
+    return sharpenCanvas(out, 0.45);
+  }
+
+  // bw: per-channel bg division → luminance → binary threshold
+  if (filter === 'bw') {
+    for (let i = 0; i < s.length; i += 4) {
+      const rn = s[i]   / Math.max(1, bg[i])   * 240;
+      const gn = s[i+1] / Math.max(1, bg[i+1]) * 240;
+      const bn = s[i+2] / Math.max(1, bg[i+2]) * 240;
+      const lum = (rn * 77 + gn * 150 + bn * 29) >> 8;
+      s[i] = s[i+1] = s[i+2] = lum < 185 ? 0 : 255;
+      s[i+3] = 255;
+    }
+    ctx.putImageData(srcImg, 0, 0);
+    return out;
+  }
+
+  // document / enhance: luminance bg-division + percentile stretch + S-curve
   const norm = new Uint8ClampedArray(pixels);
   const hist = new Int32Array(256);
   for (let i = 0, p = 0; i < s.length; i += 4, p++) {
@@ -1781,7 +1790,6 @@ function applyFilter(canvas, filter) {
     hist[n]++;
   }
 
-  // Percentile stretch at 2nd / 95th (less aggressive clipping)
   let lo = 0, hi = 255, cumul = 0;
   const p2target  = pixels * 0.02;
   const p95target = pixels * 0.95;
@@ -1792,8 +1800,8 @@ function applyFilter(canvas, filter) {
   }
   const range = Math.max(1, hi - lo);
 
-  // document: soft S-curve (1.15×) + light gamma (0.90) — avoids blow-out
-  // enhance:  moderate S-curve (1.6×) + gamma (0.75) — stronger but controlled
+  // document: soft S-curve (1.15×) + light gamma (0.90)
+  // enhance:  moderate S-curve (1.6×) + gamma (0.75)
   const sCurve = filter === 'enhance' ? 1.6  : 1.15;
   const gamma  = filter === 'enhance' ? 0.75 : 0.90;
 
@@ -1805,7 +1813,8 @@ function applyFilter(canvas, filter) {
   }
   ctx.putImageData(srcImg, 0, 0);
 
-  return filter === 'enhance' ? sharpenCanvas(out, 0.55) : out;
+  const sharpAmt = filter === 'enhance' ? 0.75 : 0.40;
+  return sharpenCanvas(out, sharpAmt);
 }
 
 // ============================================================
