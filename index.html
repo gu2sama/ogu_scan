@@ -689,7 +689,7 @@
       <button id="flash-btn" onclick="toggleFlash()">⚡</button>
       <button id="filter-btn" onclick="cycleFilter()">オリジナル</button>
     </div>
-    <button id="auto-toggle" class="off" onclick="toggleAutoCapture()">連続</button>
+    <button id="auto-toggle" class="off" onclick="toggleAutoCapture()">手動</button>
   </header>
 
   <div id="camera-wrap">
@@ -2350,7 +2350,8 @@ function toggleAutoCapture() {
   autoCaptureEnabled  = autoCaptureUserPref;
   const btn = document.getElementById('auto-toggle');
   btn.classList.toggle('off', !autoCaptureUserPref);
-  showToast(autoCaptureUserPref ? '連続撮影 ON' : '連続撮影 OFF');
+  btn.textContent = autoCaptureUserPref ? '自動' : '手動';
+  showToast(autoCaptureUserPref ? '自動撮影 ON' : '手動撮影に切替');
 }
 // ============================================================
 // Overlay drawing
