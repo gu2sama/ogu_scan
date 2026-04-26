@@ -497,10 +497,31 @@
       margin-top: 10px;
     }
     #confirm-cancel-btn:active { opacity: 0.7; }
+    #confirm-filename-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(255,255,255,0.07);
+      border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 10px;
+      padding: 10px 12px;
+      margin-bottom: 14px;
+    }
     #confirm-filename {
+      flex: 1;
+      background: none;
+      border: none;
+      outline: none;
+      color: #fff;
+      font-size: 14px;
+      min-width: 0;
+    }
+    #confirm-filename::placeholder { color: rgba(255,255,255,0.3); }
+    #confirm-filename-ext {
       font-size: 13px;
-      color: rgba(255,255,255,0.45);
-      margin-bottom: 16px;
+      color: rgba(255,255,255,0.35);
+      white-space: nowrap;
+      flex-shrink: 0;
     }
     #confirm-share-btn {
       width: 100%;
@@ -740,7 +761,10 @@
 <div id="confirm-sheet">
   <div id="confirm-handle"></div>
   <div id="confirm-thumbs"></div>
-  <div id="confirm-filename"></div>
+  <div id="confirm-filename-row">
+    <input id="confirm-filename" type="text" placeholder="ファイル名">
+    <span id="confirm-filename-ext">.pdf</span>
+  </div>
   <button id="confirm-share-btn" onclick="doShare()">共有</button>
   <button id="confirm-ocr-btn" onclick="showOcrSheet()">テキスト抽出</button>
   <button id="confirm-cancel-btn" onclick="closeConfirmSheet()">キャンセル</button>
@@ -2027,17 +2051,10 @@ function updatePageCount() {
 // ============================================================
 // Confirm sheet & share
 // ============================================================
-function buildFileName() {
+function buildFileNameStem() {
   const now = new Date();
-  const ts = [
-    now.getFullYear(), '/',
-    String(now.getMonth()+1).padStart(2,'0'), '/',
-    String(now.getDate()).padStart(2,'0'), ' ',
-    String(now.getHours()).padStart(2,'0'), ':',
-    String(now.getMinutes()).padStart(2,'0'), ':',
-    String(now.getSeconds()).padStart(2,'0')
-  ].join('');
-  return `スキャン ${ts}.pdf`;
+  const p = n => String(n).padStart(2, '0');
+  return `スキャン_${now.getFullYear()}${p(now.getMonth()+1)}${p(now.getDate())}_${p(now.getHours())}${p(now.getMinutes())}_${pages.length}p`;
 }
 
 function showConfirmSheet() {
@@ -2049,7 +2066,8 @@ function showConfirmSheet() {
   // Populate thumbnails
   renderConfirmThumbs();
 
-  document.getElementById('confirm-filename').textContent = buildFileName();
+  const fnInput = document.getElementById('confirm-filename');
+  fnInput.value = buildFileNameStem();
   document.getElementById('confirm-backdrop').classList.add('show');
   document.getElementById('confirm-sheet').classList.add('show');
 }
@@ -2069,7 +2087,7 @@ function renderConfirmThumbs() {
       deletePage(i);
       if (!pages.length) { closeConfirmSheet(); return; }
       renderConfirmThumbs();
-      document.getElementById('confirm-filename').textContent = buildFileName();
+      document.getElementById('confirm-filename').value = buildFileNameStem();
     };
     wrap.append(img, del);
     thumbs.appendChild(wrap);
@@ -2119,17 +2137,9 @@ async function doShare() {
     doc.addImage(img, 'JPEG', 0, 0, pw, ph);
   }
 
-  const now = new Date();
-  const ts = [
-    now.getFullYear(),
-    String(now.getMonth()+1).padStart(2,'0'),
-    String(now.getDate()).padStart(2,'0'),
-    '_',
-    String(now.getHours()).padStart(2,'0'),
-    String(now.getMinutes()).padStart(2,'0'),
-    String(now.getSeconds()).padStart(2,'0')
-  ].join('');
-  const fileName = `scan_${ts}_${pages.length}p.pdf`;
+  const stem = (document.getElementById('confirm-filename').value.trim() || buildFileNameStem())
+    .replace(/\.pdf$/i, '');
+  const fileName = stem + '.pdf';
   const blob = doc.output('blob');
   const file = new File([blob], fileName, { type: 'application/pdf' });
 
