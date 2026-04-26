@@ -47,12 +47,19 @@
     }
 
     #logo {
-      font-size: 15px;
+      font-size: 16px;
       font-weight: 700;
       letter-spacing: 0.5px;
     }
 
-    #logo span { color: var(--accent); }
+    #logo span {
+      color: var(--accent);
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0;
+      margin-left: 4px;
+      vertical-align: super;
+    }
 
 
     /* Auto-capture toggle */
@@ -628,7 +635,7 @@
 <body>
 <div id="app">
   <header id="header">
-    <div id="logo">ogu<span>_scan</span></div>
+    <div id="logo">OGU-SCAN<span>β版</span></div>
     <div id="header-center">
       <button id="flash-btn" onclick="toggleFlash()">⚡</button>
       <button id="filter-btn" onclick="cycleFilter()">なし</button>
@@ -734,9 +741,9 @@ window.onerror = function(msg, src, line) {
 // ============================================================
 const STABLE_MOVE_MAX  = 15;   // px (in process space)
 const PROCESS_W        = 640;  // processing resolution width
-const CAPTURE_MAX_W    = 2000; // max width for warp canvas
+const CAPTURE_MAX_W    = 2480; // max width for warp canvas (~300dpi A4)
 const DETECT_W         = 160;  // detection resolution
-const STABLE_THRESHOLD = 25;   // ~0.8s at 30fps
+const STABLE_SECONDS   = 0.85; // seconds of stability required before auto-capture
 const CAPTURE_COOLDOWN = 5000; // ms between auto-captures
 const FILTERS       = ['original', 'brighten', 'document', 'enhance', 'bw'];
 const FILTER_LABELS = { original: 'なし', brighten: '明るく', document: 'ドキュメント', enhance: '拡張', bw: '白黒' };
@@ -762,8 +769,14 @@ let lastCvCorners      = null; // { corners, pw, ph }
 let tessWorker         = null;
 let toastTimer;
 let pageWarped  = [];   // canvas after warp, before filter (for re-filtering)
-let pageSrcs    = [];   // { canvas, corners } — original capture + detected corners (for 調整)
+let pageSrcs    = [];   // { blobUrl, corners, w, h } — srcCanvas stored as blob (for 調整)
 let pageFilters = [];   // active filter per page
+
+// iPhone optimization state
+let fpsEstimate      = 30;    // measured over first 1.5s of camera feed
+let detectionReady   = false; // false during AE convergence phase after camera start
+let editorSrcCanvas  = null;  // srcCanvas loaded on demand when editor opens in adjust mode
+let warpWorker       = null;  // Web Worker for perspective warp (keeps UI thread free)
 
 // Editor state
 let editIndex   = -1;
@@ -806,8 +819,8 @@ async function startCamera() {
       video: {
         facingMode: { ideal: 'environment' },
         width:  { ideal: 3840 },
-        height: { ideal: 2160 },
-        focusMode: { ideal: 'continuous' }
+        height: { ideal: 2160 }
+        // focusMode omitted — Safari ignores it; iPhone uses continuous AF by default
       },
       audio: false
     });
@@ -816,7 +829,21 @@ async function startCamera() {
     await video.play();
     loadingEl.style.display = 'none';
     if (animId) cancelAnimationFrame(animId);
+    detectionReady = false;
     loop();
+    // Measure actual FPS over 1.5s and enable detection after AE converges
+    let _fCount = 0;
+    const _t0 = performance.now();
+    const _countFps = () => {
+      _fCount++;
+      if (performance.now() - _t0 < 1500) {
+        requestAnimationFrame(_countFps);
+      } else {
+        fpsEstimate    = Math.max(15, Math.min(65, Math.round(_fCount / 1.5)));
+        detectionReady = true;
+      }
+    };
+    requestAnimationFrame(_countFps);
     loadOpenCV(); // background — improves corner detection when ready
   } catch (e) {
     loadingEl.style.display = 'none';
@@ -833,6 +860,8 @@ function init() { startCamera(); }
 function loop() {
   animId = requestAnimationFrame(loop);
   if (video.readyState < 2) return;
+
+  if (!detectionReady) return;
 
   const vw = video.videoWidth;
   const vh = video.videoHeight;
@@ -882,12 +911,16 @@ function loop() {
     ]);
   }
 
+  // Dynamic threshold: STABLE_SECONDS of actual camera FPS
+  const STABLE_THRESHOLD = Math.round(fpsEstimate * STABLE_SECONDS);
+
   if (result.detected) {
-    // EMA smoothing: blend new corners with history to reduce jitter
+    // Adaptive EMA: fast tracking when searching, tight when stable
     if (smoothedCorners) {
+      const alpha = stableFrames < 5 ? 0.35 : 0.12;
       smoothedCorners = smoothedCorners.map(([sx, sy], i) => [
-        sx * 0.82 + result.corners[i][0] * 0.18,
-        sy * 0.82 + result.corners[i][1] * 0.18
+        sx * (1 - alpha) + result.corners[i][0] * alpha,
+        sy * (1 - alpha) + result.corners[i][1] * alpha
       ]);
     } else {
       smoothedCorners = result.corners;
@@ -1007,29 +1040,42 @@ function cannyEdges(rgba, w, h) {
       nms[i] = (mag[i] >= n1 && mag[i] >= n2) ? mag[i] : 0;
     }
 
-  // 5. Auto-thresholds from gradient distribution
-  let maxMag = 0;
-  for (let i = 0; i < nms.length; i++) if (nms[i] > maxMag) maxMag = nms[i];
-  if (maxMag < 1) return new Uint8Array(w * h);
-  const hi = maxMag * 0.18;
-  const lo = hi * 0.4;
+  // 5. Adaptive thresholds via 95th-percentile of non-zero gradient magnitudes
+  //    (robust against blown-out highlights from iPhone AE)
+  let maxMag = 0, nzCount = 0;
+  for (let i = 0; i < nms.length; i++) {
+    if (nms[i] > maxMag) maxMag = nms[i];
+    if (nms[i] > 0) nzCount++;
+  }
+  if (maxMag < 1 || nzCount === 0) return new Uint8Array(w * h);
+  const mscale = 255 / maxMag;
+  const mhist  = new Int32Array(256);
+  for (let i = 0; i < nms.length; i++) if (nms[i] > 0) mhist[nms[i] * mscale | 0]++;
+  // Walk from top until 5% of non-zero pixels covered → 95th percentile
+  const p05 = nzCount * 0.05;
+  let cumtop = 0, p95bin = 200;
+  for (let v = 255; v >= 0; v--) { cumtop += mhist[v]; if (cumtop >= p05) { p95bin = v; break; } }
+  const hi = (p95bin / 255) * maxMag;
+  const lo = hi * 0.35;
 
-  // 6. Hysteresis (strong edges propagate to connected weak edges)
+  // 6. Hysteresis — BFS from strong edges, O(n) instead of O(n²) while-loop
   const edges = new Uint8Array(w * h);
   for (let i = 0; i < nms.length; i++) {
     if (nms[i] >= hi) edges[i] = 2;
     else if (nms[i] >= lo) edges[i] = 1;
   }
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (let y = 1; y < h-1; y++)
-      for (let x = 1; x < w-1; x++) {
-        if (edges[y*w+x] !== 1) continue;
-        for (let dy = -1; dy <= 1; dy++)
-          for (let dx = -1; dx <= 1; dx++)
-            if (edges[(y+dy)*w+x+dx] === 2) { edges[y*w+x] = 2; changed = true; }
-      }
+  const stack = [];
+  for (let i = 0; i < nms.length; i++) if (edges[i] === 2) stack.push(i);
+  while (stack.length) {
+    const idx = stack.pop();
+    const ey = idx / w | 0, ex = idx % w;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      if (!dy && !dx) continue;
+      const ny = ey + dy, nx = ex + dx;
+      if (ny < 0 || ny >= h || nx < 0 || nx >= w) continue;
+      const ni = ny * w + nx;
+      if (edges[ni] === 1) { edges[ni] = 2; stack.push(ni); }
+    }
   }
   for (let i = 0; i < edges.length; i++) edges[i] = edges[i] === 2 ? 1 : 0;
   return edges;
@@ -1229,7 +1275,9 @@ function detectDocBrightness(data, w, h) {
   const relArea  = (regionW * regionH) / (w * h);
 
   // Document = significant bright region, not filling entire frame
-  if (brightRatio < 0.05 || brightRatio > 0.88) return { detected: false };
+  // Upper limit raised to 0.92: iPhone AE on white doc over white desk
+  // can push the whole frame bright — 0.88 was too aggressive
+  if (brightRatio < 0.05 || brightRatio > 0.92) return { detected: false };
   if (relArea     < 0.08 || relArea     > 0.98) return { detected: false };
   if (regionW < 5 || regionH < 5)               return { detected: false };
 
@@ -1320,13 +1368,15 @@ async function captureDocument(corners, pw, ph, vw, vh) {
   }
 
   const { outW, outH } = computeOutputSize(scaledCorners, capW, capH);
-  const dst = [[0,0],[outW,0],[outW,outH],[0,outH]];
-
-  const H = computeHomography(scaledCorners, dst);
-  const warped = warpPerspective(srcCanvas, H, outW, outH);
+  const H      = computeHomography(scaledCorners, [[0,0],[outW,0],[outW,outH],[0,outH]]);
+  const warped = await warpPerspectiveAsync(srcCanvas, H, outW, outH);
   const filtered = applyFilter(warped, currentFilter);
 
-  addPage(filtered, warped, { canvas: srcCanvas, corners: scaledCorners }, currentFilter);
+  // Convert srcCanvas to blob URL to free ~34MB of pixel memory
+  const srcBlob = await new Promise(r => srcCanvas.toBlob(r, 'image/jpeg', 0.92));
+  const srcUrl  = URL.createObjectURL(srcBlob);
+  addPage(filtered, warped, { blobUrl: srcUrl, corners: scaledCorners, w: capW, h: capH }, currentFilter);
+
   setStatus('captured');
   setTimeout(() => setStatus('searching'), 1200);
   isCapturing = false;
@@ -1358,9 +1408,11 @@ async function manualCapture() {
         scaledCorners = cvScaled;
     }
     const { outW, outH } = computeOutputSize(scaledCorners, capW, capH);
-    const H = computeHomography(scaledCorners, [[0,0],[outW,0],[outW,outH],[0,outH]]);
-    const warped = warpPerspective(srcCanvas, H, outW, outH);
-    addPage(applyFilter(warped, currentFilter), warped, { canvas: srcCanvas, corners: scaledCorners }, currentFilter);
+    const H      = computeHomography(scaledCorners, [[0,0],[outW,0],[outW,outH],[0,outH]]);
+    const warped = await warpPerspectiveAsync(srcCanvas, H, outW, outH);
+    const srcBlob = await new Promise(r => srcCanvas.toBlob(r, 'image/jpeg', 0.92));
+    const srcUrl  = URL.createObjectURL(srcBlob);
+    addPage(applyFilter(warped, currentFilter), warped, { blobUrl: srcUrl, corners: scaledCorners, w: capW, h: capH }, currentFilter);
   } else {
     addPage(applyFilter(srcCanvas, currentFilter), srcCanvas, null, currentFilter);
   }
@@ -1420,6 +1472,68 @@ function warpPerspective(srcCanvas, H, outW, outH) {
 
   oc.putImageData(outData, 0, 0);
   return out;
+}
+
+// ============================================================
+// Async warp via Web Worker — keeps UI thread free on iPhone
+// ============================================================
+function _ensureWarpWorker() {
+  if (warpWorker) return;
+  const code = `self.onmessage=function(e){
+    var d=e.data,sd=d.sd,sw=d.sw,sh=d.sh,m=d.hinv,outW=d.outW,outH=d.outH;
+    var a=m[0],b=m[1],c=m[2],dd=m[3],ee=m[4],f=m[5],g=m[6],h=m[7],k=m[8];
+    var od=new Uint8ClampedArray(outW*outH*4);
+    for(var dy=0;dy<outH;dy++){for(var dx=0;dx<outW;dx++){
+      var ww=g*dx+h*dy+k,sx=(a*dx+b*dy+c)/ww,sy=(dd*dx+ee*dy+f)/ww;
+      if(sx<0||sx>=sw-1||sy<0||sy>=sh-1)continue;
+      var x0=sx|0,y0=sy|0,fx=sx-x0,fy=sy-y0;
+      var i00=(y0*sw+x0)*4,i10=i00+4,i01=i00+sw*4,i11=i01+4,oi=(dy*outW+dx)*4;
+      var w00=(1-fx)*(1-fy),w10=fx*(1-fy),w01=(1-fx)*fy,w11=fx*fy;
+      od[oi]=sd[i00]*w00+sd[i10]*w10+sd[i01]*w01+sd[i11]*w11;
+      od[oi+1]=sd[i00+1]*w00+sd[i10+1]*w10+sd[i01+1]*w01+sd[i11+1]*w11;
+      od[oi+2]=sd[i00+2]*w00+sd[i10+2]*w10+sd[i01+2]*w01+sd[i11+2]*w11;
+      od[oi+3]=255;
+    }}
+    self.postMessage({od:od,outW:outW,outH:outH},[od.buffer]);
+  };`;
+  const blob = new Blob([code], { type: 'application/javascript' });
+  warpWorker = new Worker(URL.createObjectURL(blob));
+}
+
+async function warpPerspectiveAsync(srcCanvas, H, outW, outH) {
+  const out = document.createElement('canvas');
+  out.width = outW; out.height = outH;
+  if (!H) { out.getContext('2d').drawImage(srcCanvas, 0, 0, outW, outH); return out; }
+  const Hinv = invertMat3(H);
+  if (!Hinv) { out.getContext('2d').drawImage(srcCanvas, 0, 0, outW, outH); return out; }
+
+  const hinv = new Float64Array([
+    Hinv[0][0], Hinv[0][1], Hinv[0][2],
+    Hinv[1][0], Hinv[1][1], Hinv[1][2],
+    Hinv[2][0], Hinv[2][1], Hinv[2][2]
+  ]);
+  const srcCtx  = srcCanvas.getContext('2d', { willReadFrequently: true });
+  const srcData = srcCtx.getImageData(0, 0, srcCanvas.width, srcCanvas.height);
+  // Slice to create a new buffer we can transfer without detaching srcCanvas
+  const sd = new Uint8Array(srcData.data.buffer.slice(0));
+
+  _ensureWarpWorker();
+  return new Promise(resolve => {
+    const handler = e => {
+      warpWorker.removeEventListener('message', handler);
+      const { od, outW: w, outH: h } = e.data;
+      const ctx = out.getContext('2d');
+      const img = ctx.createImageData(w, h);
+      img.data.set(new Uint8ClampedArray(od.buffer));
+      ctx.putImageData(img, 0, 0);
+      resolve(out);
+    };
+    warpWorker.addEventListener('message', handler);
+    warpWorker.postMessage(
+      { sd, sw: srcCanvas.width, sh: srcCanvas.height, hinv, outW, outH },
+      [sd.buffer, hinv.buffer]
+    );
+  });
 }
 
 // ============================================================
@@ -1715,6 +1829,8 @@ function renderThumbs() {
 }
 
 function deletePage(i) {
+  const src = pageSrcs[i];
+  if (src && src.blobUrl) URL.revokeObjectURL(src.blobUrl);
   pages.splice(i, 1);
   pageWarped.splice(i, 1);
   pageSrcs.splice(i, 1);
@@ -1896,13 +2012,18 @@ function loadScript(src) {
 // ============================================================
 function loadOpenCV() {
   if (cvReady) return;
-  const s = document.createElement('script');
-  s.src = 'https://docs.opencv.org/4.10.0/opencv.js';
-  s.async = true;
-  document.head.appendChild(s);
   const check = setInterval(() => {
     if (typeof cv !== 'undefined' && cv.Mat) { clearInterval(check); cvReady = true; }
   }, 300);
+  const load = src => {
+    const s = document.createElement('script');
+    s.src = src; s.async = true;
+    document.head.appendChild(s);
+    return s;
+  };
+  // Prefer local copy (avoids 8MB mobile download); fall back to CDN
+  const local = load('./opencv.js');
+  local.onerror = () => load('https://docs.opencv.org/4.10.0/opencv.js');
 }
 
 function detectDocOpenCV(data, w, h) {
@@ -1915,7 +2036,12 @@ function detectDocOpenCV(data, w, h) {
 
     C.cvtColor(src, gray, C.COLOR_RGBA2GRAY);
     C.GaussianBlur(gray, blurred, new C.Size(5, 5), 0);
-    C.Canny(blurred, edges, 30, 100);
+    // Otsu-based adaptive thresholds — robust across iPhone lighting conditions
+    const otsuMat = new C.Mat();
+    const otsuVal = C.threshold(blurred, otsuMat, 0, 255, C.THRESH_BINARY | C.THRESH_OTSU);
+    otsuMat.delete();
+    const cvHi = Math.max(30, otsuVal * 0.5);
+    C.Canny(blurred, edges, cvHi * 0.3, cvHi);
     C.dilate(edges, dilated, kernel);
     C.findContours(dilated, contours, hier, C.RETR_EXTERNAL, C.CHAIN_APPROX_SIMPLE);
 
@@ -2199,11 +2325,12 @@ function avgDist(a, b) {
 // ============================================================
 // Page Editor
 // ============================================================
-function openEditor(i) {
-  editIndex   = i;
-  editMode    = 'none';
-  editHandles = [];
-  editDragIdx = -1;
+async function openEditor(i) {
+  editIndex       = i;
+  editMode        = 'none';
+  editHandles     = [];
+  editDragIdx     = -1;
+  editorSrcCanvas = null;
   autoCaptureEnabled = false;
 
   document.getElementById('editor-title').textContent = `ページ ${i + 1}`;
@@ -2211,6 +2338,17 @@ function openEditor(i) {
   document.getElementById('editor-btn-filter').classList.remove('active');
   document.getElementById('editor-filter-bar').classList.remove('show');
   document.getElementById('editor-sheet').classList.add('show');
+
+  // Preload srcCanvas from blob URL — kept in memory only while editor is open
+  const src = pageSrcs[i];
+  if (src && src.blobUrl) {
+    const img = new Image();
+    await new Promise(r => { img.onload = r; img.src = src.blobUrl; });
+    editorSrcCanvas = document.createElement('canvas');
+    editorSrcCanvas.width  = img.naturalWidth;
+    editorSrcCanvas.height = img.naturalHeight;
+    editorSrcCanvas.getContext('2d').drawImage(img, 0, 0);
+  }
 
   _drawEditorPage();
 
@@ -2225,9 +2363,10 @@ function openEditor(i) {
 
 function closeEditor() {
   document.getElementById('editor-sheet').classList.remove('show');
-  editIndex   = -1;
-  editMode    = 'none';
-  editHandles = [];
+  editIndex       = -1;
+  editMode        = 'none';
+  editHandles     = [];
+  editorSrcCanvas = null;  // release memory
   autoCaptureEnabled = autoCaptureUserPref;
 
   const ec = document.getElementById('editor-canvas');
@@ -2289,7 +2428,7 @@ function _drawEditorPage() {
 function _drawEditorAdjust() {
   if (editIndex < 0) return;
   const src = pageSrcs[editIndex];
-  if (!src || !src.corners) {
+  if (!src || !src.corners || !editorSrcCanvas) {
     editMode = 'none';
     document.getElementById('editor-btn-adjust').classList.remove('active');
     _drawEditorPage();
@@ -2300,7 +2439,7 @@ function _drawEditorAdjust() {
   const wrap    = document.getElementById('editor-canvas-wrap');
   const maxW    = wrap.clientWidth;
   const maxH    = wrap.clientHeight;
-  const srcC    = src.canvas;
+  const srcC    = editorSrcCanvas;
   const corners = src.corners;
 
   // Crop to document bounding box + 12% padding — fills screen much better
@@ -2393,8 +2532,7 @@ function _edTouchMove(e) {
     Math.max(0, Math.min(ec.width,  x)),
     Math.max(0, Math.min(ec.height, y))
   ];
-  const src = pageSrcs[editIndex];
-  if (src) _redrawAdjust(src.canvas);
+  if (editorSrcCanvas) _redrawAdjust(editorSrcCanvas);
 }
 function _edTouchEnd(e) {
   if (editMode !== 'adjust' || editDragIdx < 0) return;
@@ -2413,8 +2551,7 @@ function _edMouseMove(e) {
     Math.max(0, Math.min(ec.width,  x)),
     Math.max(0, Math.min(ec.height, y))
   ];
-  const src = pageSrcs[editIndex];
-  if (src) _redrawAdjust(src.canvas);
+  if (editorSrcCanvas) _redrawAdjust(editorSrcCanvas);
 }
 function _edMouseUp() {
   if (editMode !== 'adjust' || editDragIdx < 0) return;
@@ -2422,19 +2559,19 @@ function _edMouseUp() {
   _commitAdjust();
 }
 
-function _commitAdjust() {
-  if (editIndex < 0 || editHandles.length < 4) return;
+async function _commitAdjust() {
+  if (editIndex < 0 || editHandles.length < 4 || !editorSrcCanvas) return;
   const src = pageSrcs[editIndex];
   if (!src) return;
   const newCorners = editHandles.map(([x, y]) => [x / _edScale + _edOffX, y / _edScale + _edOffY]);
-  const { outW, outH } = computeOutputSize(newCorners, src.canvas.width, src.canvas.height);
+  const { outW, outH } = computeOutputSize(newCorners, editorSrcCanvas.width, editorSrcCanvas.height);
   if (outW < 10 || outH < 10) return;
   const H      = computeHomography(newCorners, [[0,0],[outW,0],[outW,outH],[0,outH]]);
-  const warped = warpPerspective(src.canvas, H, outW, outH);
+  const warped = await warpPerspectiveAsync(editorSrcCanvas, H, outW, outH);
   const filter = pageFilters[editIndex];
   pages[editIndex]      = applyFilter(warped, filter);
   pageWarped[editIndex] = warped;
-  pageSrcs[editIndex]   = { canvas: src.canvas, corners: newCorners };
+  pageSrcs[editIndex]   = { ...src, corners: newCorners };
   renderThumbs();
 }
 
@@ -2497,6 +2634,7 @@ function editorRotate() {
   pages[editIndex]      = _rot(pages[editIndex]);
   pageWarped[editIndex] = _rot(pageWarped[editIndex]);
   pageSrcs[editIndex]   = null;  // rotation invalidates perspective correction data
+  editorSrcCanvas       = null;  // release preloaded canvas
   if (editMode === 'adjust') {
     editMode = 'none';
     document.getElementById('editor-btn-adjust').classList.remove('active');
