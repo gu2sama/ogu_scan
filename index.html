@@ -497,6 +497,11 @@
       margin-top: 10px;
     }
     #confirm-cancel-btn:active { opacity: 0.7; }
+    #confirm-filename-label {
+      font-size: 11px;
+      color: rgba(255,255,255,0.38);
+      margin-bottom: 6px;
+    }
     #confirm-filename-row {
       display: flex;
       align-items: center;
@@ -535,72 +540,6 @@
       cursor: pointer;
     }
     #confirm-share-btn:active { opacity: 0.85; }
-
-    /* OCR sheet */
-    #ocr-sheet {
-      position: fixed;
-      inset: 0;
-      background: #0a0a0b;
-      z-index: 70;
-      display: flex;
-      flex-direction: column;
-      transform: translateY(100%);
-      transition: transform 0.32s cubic-bezier(0.32,0.72,0,1);
-    }
-    #ocr-sheet.show { transform: translateY(0); }
-    #ocr-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 14px 20px;
-      padding-top: calc(14px + env(safe-area-inset-top));
-      border-bottom: 1px solid rgba(255,255,255,0.08);
-      flex-shrink: 0;
-    }
-    #ocr-header span { font-size: 15px; font-weight: 600; }
-    #ocr-header button {
-      font-size: 14px; background: none; border: none;
-      color: var(--accent); cursor: pointer; padding: 6px;
-      min-width: 60px;
-    }
-    #ocr-scroll {
-      flex: 1; overflow-y: auto;
-      padding: 16px 20px;
-      padding-bottom: calc(16px + env(safe-area-inset-bottom));
-    }
-    .ocr-page { margin-bottom: 28px; }
-    .ocr-page-label { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
-    .ocr-page img { width: 100%; border-radius: 8px; display: block; margin-bottom: 10px; }
-    .ocr-page textarea {
-      width: 100%; min-height: 100px;
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 8px; color: var(--text);
-      font-size: 13px; line-height: 1.7;
-      padding: 10px 12px; resize: vertical;
-      font-family: -apple-system, sans-serif;
-    }
-    #ocr-loading {
-      position: absolute; inset: 0;
-      display: flex; flex-direction: column;
-      align-items: center; justify-content: center; gap: 14px;
-      background: rgba(10,10,11,0.92);
-    }
-    #ocr-loading-text { font-size: 13px; color: var(--muted); text-align: center; padding: 0 32px; }
-    #ocr-progress-bar {
-      width: 200px; height: 3px;
-      background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden;
-    }
-    #ocr-progress-fill { height: 100%; background: var(--accent); width: 0%; transition: width 0.3s; }
-    #confirm-ocr-btn {
-      width: 100%; padding: 14px;
-      background: rgba(255,255,255,0.06);
-      color: rgba(255,255,255,0.8);
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 12px; font-size: 16px; font-weight: 600;
-      cursor: pointer; margin-top: 10px;
-    }
-    #confirm-ocr-btn:active { opacity: 0.7; }
 
     /* Toast */
     #toast {
@@ -761,26 +700,13 @@
 <div id="confirm-sheet">
   <div id="confirm-handle"></div>
   <div id="confirm-thumbs"></div>
+  <div id="confirm-filename-label">タップしてファイル名を変更</div>
   <div id="confirm-filename-row">
     <input id="confirm-filename" type="text" placeholder="ファイル名">
     <span id="confirm-filename-ext">.pdf</span>
   </div>
   <button id="confirm-share-btn" onclick="doShare()">共有</button>
-  <button id="confirm-ocr-btn" onclick="showOcrSheet()">テキスト抽出</button>
   <button id="confirm-cancel-btn" onclick="closeConfirmSheet()">キャンセル</button>
-</div>
-
-<div id="ocr-sheet">
-  <div id="ocr-header">
-    <button onclick="closeOcrSheet()">閉じる</button>
-    <span>テキスト抽出</span>
-    <button id="ocr-copy-btn" onclick="copyAllOcrText()" style="display:none">全コピー</button>
-  </div>
-  <div id="ocr-scroll"></div>
-  <div id="ocr-loading">
-    <div id="ocr-loading-text">準備中...</div>
-    <div id="ocr-progress-bar"><div id="ocr-progress-fill"></div></div>
-  </div>
 </div>
 
 <!-- Page Editor sheet -->
@@ -850,7 +776,6 @@ let flashOn            = false;
 let cvReady            = false;
 let cvFrameCount       = 0;
 let lastCvCorners      = null; // { corners, pw, ph }
-let tessWorker         = null;
 let toastTimer;
 let pageWarped  = [];   // canvas after warp, before filter (for re-filtering)
 let pageSrcs    = [];   // { blobUrl, corners, w, h } — srcCanvas stored as blob (for 調整)
@@ -2188,14 +2113,6 @@ async function toggleFlash() {
 // ============================================================
 // Utilities
 // ============================================================
-function loadScript(src) {
-  return new Promise((resolve, reject) => {
-    const s = document.createElement('script');
-    s.src = src; s.onload = resolve; s.onerror = reject;
-    document.head.appendChild(s);
-  });
-}
-
 // ============================================================
 // OpenCV.js — background load + improved corner detection
 // ============================================================
@@ -2271,90 +2188,6 @@ function orderCvCorners(pts) {
 }
 
 // ============================================================
-// OCR (Tesseract.js)
-// ============================================================
-async function showOcrSheet() {
-  closeConfirmSheet();
-  const sheet    = document.getElementById('ocr-sheet');
-  const scroll   = document.getElementById('ocr-scroll');
-  const loading  = document.getElementById('ocr-loading');
-  const copyBtn  = document.getElementById('ocr-copy-btn');
-  const loadText = document.getElementById('ocr-loading-text');
-  const progress = document.getElementById('ocr-progress-fill');
-
-  scroll.innerHTML = '';
-  copyBtn.style.display = 'none';
-  loading.style.display = 'flex';
-  progress.style.width = '0%';
-  loadText.textContent = '準備中...';
-  sheet.classList.add('show');
-
-  try {
-    if (!window.Tesseract) {
-      loadText.textContent = 'OCRエンジンを読み込み中...';
-      await loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js');
-    }
-
-    if (!tessWorker) {
-      loadText.textContent = '日本語モデルを読み込み中... (初回のみ約30秒)';
-      tessWorker = await Tesseract.createWorker(['jpn', 'eng'], 1, {
-        logger: m => {
-          if (m.status === 'loading tesseract core') {
-            progress.style.width = `${m.progress * 25}%`;
-          } else if (m.status === 'loading language traineddata') {
-            loadText.textContent = '日本語データを読み込み中...';
-            progress.style.width = `${25 + m.progress * 50}%`;
-          } else if (m.status === 'initializing tesseract') {
-            loadText.textContent = '初期化中...';
-            progress.style.width = `${75 + m.progress * 15}%`;
-          }
-        }
-      });
-    }
-
-    for (let i = 0; i < pages.length; i++) {
-      loadText.textContent = `テキスト抽出中 ${i + 1} / ${pages.length}...`;
-      progress.style.width = `${90 + (i / pages.length) * 10}%`;
-
-      const { data } = await tessWorker.recognize(pages[i]);
-
-      const pageDiv = document.createElement('div');
-      pageDiv.className = 'ocr-page';
-
-      const label = document.createElement('div');
-      label.className = 'ocr-page-label';
-      label.textContent = `ページ ${i + 1}`;
-
-      const img = document.createElement('img');
-      img.src = pages[i].toDataURL('image/jpeg', 0.8);
-
-      const ta = document.createElement('textarea');
-      ta.value = data.text.trim();
-      ta.placeholder = 'テキストを抽出できませんでした';
-
-      pageDiv.append(label, img, ta);
-      scroll.appendChild(pageDiv);
-    }
-
-    loading.style.display = 'none';
-    copyBtn.style.display = 'block';
-  } catch(e) {
-    loadText.textContent = `エラー: ${e.message}`;
-  }
-}
-
-function closeOcrSheet() {
-  document.getElementById('ocr-sheet').classList.remove('show');
-}
-
-function copyAllOcrText() {
-  const text = [...document.querySelectorAll('#ocr-scroll textarea')]
-    .map(t => t.value).join('\n\n---\n\n');
-  navigator.clipboard.writeText(text)
-    .then(() => showToast('テキストをコピーしました'))
-    .catch(() => showToast('コピーに失敗しました'));
-}
-
 function toggleAutoCapture() {
   autoCaptureUserPref = !autoCaptureUserPref;
   autoCaptureEnabled  = autoCaptureUserPref;
