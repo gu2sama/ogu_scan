@@ -1192,13 +1192,20 @@ function findDocQuadFromLines(lines, w, h) {
                 x < -margin || x > w+margin || y < -margin || y > h+margin)) continue;
               const q = orderQuadCorners([p1, p2, p3, p4]);
               if (isValidQuad(q, w, h)) {
-                // Score by area — prefer outermost quad (document edge > internal table lines)
                 const ar = 0.5 * Math.abs(
                   q[0][0]*q[1][1] - q[1][0]*q[0][1] +
                   q[1][0]*q[2][1] - q[2][0]*q[1][1] +
                   q[2][0]*q[3][1] - q[3][0]*q[2][1] +
                   q[3][0]*q[0][1] - q[0][0]*q[3][1]);
-                if (ar > bestS) { bestS = ar; bestQ = q; }
+                // Penalise corners close to the frame boundary.
+                // Background edges (table, wall) tend to produce intersections
+                // near the frame edge; document corners rarely do.
+                const framePenalty = q.reduce((s, [px, py]) => {
+                  const d = Math.min(px, w - px, py, h - py);
+                  return s + Math.max(0, minSep - d) / minSep;
+                }, 0);
+                const score = ar * Math.max(0.1, 1 - framePenalty * 0.25);
+                if (score > bestS) { bestS = score; bestQ = q; }
               }
             }
         }
@@ -1230,12 +1237,19 @@ function detectDocument(data, w, h) {
   const edgeCorners  = detectDocEdges(data, w, h);
 
   if (brightResult.detected && edgeCorners) {
-    // Both succeeded — prefer the larger quad.
-    // Brightness can find an inner region when shadow hides corners;
-    // edge-based finds the true document boundary in that case.
     const bArea = quadArea(brightResult.corners);
     const eArea = quadArea(edgeCorners);
-    if (eArea > bArea * 1.08) return { detected: true, corners: edgeCorners };
+
+    // Guard: if edge detection's lowest point extends more than 12% of the
+    // frame height below the brightness region, it has likely latched onto a
+    // table / mat edge beneath the document — use the tighter brightness result.
+    const bYmax = Math.max(...brightResult.corners.map(([, y]) => y));
+    const eYmax = Math.max(...edgeCorners.map(([, y]) => y));
+    if ((eYmax - bYmax) / h > 0.12) return brightResult;
+
+    // Raised threshold: edge detection must find ≥35% more area before
+    // overriding brightness, to resist false wins from background lines.
+    if (eArea > bArea * 1.35) return { detected: true, corners: edgeCorners };
     return brightResult;
   }
 
