@@ -369,6 +369,55 @@
     }
     #preview-overlay.show #preview-img { transform: scale(1); }
 
+    /* Capture preview with filter selection */
+    #capture-preview {
+      position: fixed;
+      inset: 0;
+      background: #0a0a0b;
+      z-index: 55;
+      display: none;
+      flex-direction: column;
+      align-items: stretch;
+    }
+    #capture-preview.show { display: flex; }
+    #capture-preview-img {
+      flex: 1;
+      min-height: 0;
+      width: 100%;
+      object-fit: contain;
+      padding: 12px 12px 0;
+    }
+    #capture-filter-bar {
+      display: flex;
+      flex-direction: row;
+      gap: 10px;
+      padding: 10px 16px;
+      overflow-x: auto;
+      scrollbar-width: none;
+      -webkit-overflow-scrolling: touch;
+      flex-shrink: 0;
+    }
+    #capture-filter-bar::-webkit-scrollbar { display: none; }
+    #capture-preview-actions {
+      display: flex;
+      gap: 12px;
+      padding: 8px 20px;
+      padding-bottom: calc(8px + env(safe-area-inset-bottom));
+      flex-shrink: 0;
+    }
+    #capture-discard-btn, #capture-confirm-btn {
+      flex: 1;
+      padding: 14px;
+      border-radius: 12px;
+      border: none;
+      font-size: 17px;
+      font-weight: 600;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #capture-discard-btn { background: rgba(255,255,255,0.1); color: #fff; }
+    #capture-confirm-btn { background: var(--accent); color: #000; }
+
     /* Confirm sheet */
     #confirm-backdrop {
       position: fixed;
@@ -676,6 +725,16 @@
   <img id="preview-img" alt="">
 </div>
 
+<!-- Capture preview with filter selection -->
+<div id="capture-preview">
+  <img id="capture-preview-img" alt="">
+  <div id="capture-filter-bar"></div>
+  <div id="capture-preview-actions">
+    <button id="capture-discard-btn" onclick="discardCapture()">破棄</button>
+    <button id="capture-confirm-btn" onclick="confirmCapture()">追加</button>
+  </div>
+</div>
+
 <!-- Confirm sheet before sharing -->
 <div id="confirm-backdrop" onclick="closeConfirmSheet()"></div>
 <div id="confirm-sheet">
@@ -760,6 +819,7 @@ let smoothedCorners = null;
 let isCapturing      = false;
 let lastCaptureTime  = 0;
 let currentFilter      = 'original';
+let pendingCapture     = null; // { warped, srcData, filter }
 let autoCaptureUserPref = false;  // user's chosen mode (persists across sheet open/close)
 let autoCaptureEnabled  = false;  // runtime state (may be suppressed while sheets are open)
 let flashOn            = false;
@@ -945,7 +1005,7 @@ function loop() {
     setStatus(progress >= 1 ? 'stable' : 'detecting');
 
     const now = Date.now();
-    if (progress >= 1 && !isCapturing && autoCaptureEnabled &&
+    if (progress >= 1 && !isCapturing && !pendingCapture && autoCaptureEnabled &&
         isValidQuad(smoothedCorners, pw, ph) &&
         now - lastCaptureTime > CAPTURE_COOLDOWN) {
       lastCaptureTime = now;
@@ -1395,12 +1455,11 @@ async function captureDocument(corners, pw, ph, vw, vh) {
   const { outW, outH } = computeOutputSize(scaledCorners, capW, capH);
   const H      = computeHomography(scaledCorners, [[0,0],[outW,0],[outW,outH],[0,outH]]);
   const warped = await warpPerspectiveAsync(srcCanvas, H, outW, outH);
-  const filtered = applyFilter(warped, currentFilter);
 
   // Convert srcCanvas to blob URL to free ~34MB of pixel memory
   const srcBlob = await new Promise(r => srcCanvas.toBlob(r, 'image/jpeg', 0.92));
   const srcUrl  = URL.createObjectURL(srcBlob);
-  addPage(filtered, warped, { blobUrl: srcUrl, corners: scaledCorners, w: capW, h: capH }, currentFilter);
+  showCapturePreview(warped, { blobUrl: srcUrl, corners: scaledCorners, w: capW, h: capH });
 
   setStatus('captured');
   setTimeout(() => setStatus('searching'), 1200);
@@ -1437,9 +1496,9 @@ async function manualCapture() {
     const warped = await warpPerspectiveAsync(srcCanvas, H, outW, outH);
     const srcBlob = await new Promise(r => srcCanvas.toBlob(r, 'image/jpeg', 0.92));
     const srcUrl  = URL.createObjectURL(srcBlob);
-    addPage(applyFilter(warped, currentFilter), warped, { blobUrl: srcUrl, corners: scaledCorners, w: capW, h: capH }, currentFilter);
+    showCapturePreview(warped, { blobUrl: srcUrl, corners: scaledCorners, w: capW, h: capH });
   } else {
-    addPage(applyFilter(srcCanvas, currentFilter), srcCanvas, null, currentFilter);
+    showCapturePreview(srcCanvas, null);
   }
 
   isCapturing = false;
@@ -1839,6 +1898,64 @@ function addPage(canvas, warped, srcData, filter) {
 
 function closePreview() {
   document.getElementById('preview-overlay').classList.remove('show');
+}
+
+function showCapturePreview(warped, srcData) {
+  pendingCapture = { warped, srcData, filter: currentFilter };
+  document.getElementById('capture-preview-img').src =
+    applyFilter(warped, currentFilter).toDataURL('image/jpeg', 0.85);
+  _buildCaptureFilterThumbs(warped, currentFilter);
+  document.getElementById('capture-preview').classList.add('show');
+}
+
+function _buildCaptureFilterThumbs(warped, activeFilter) {
+  const bar = document.getElementById('capture-filter-bar');
+  bar.innerHTML = '';
+  const prevW = Math.min(150, warped.width);
+  const prevH = Math.round(prevW * warped.height / warped.width);
+  FILTERS.forEach(f => {
+    const prev = document.createElement('canvas');
+    prev.width = prevW; prev.height = prevH;
+    prev.getContext('2d').drawImage(warped, 0, 0, prevW, prevH);
+    const btn = document.createElement('button');
+    btn.className = 'editor-filter-opt' + (activeFilter === f ? ' active' : '');
+    btn.onclick = () => capturePreviewPickFilter(f);
+    const img = document.createElement('img');
+    img.className = 'editor-filter-thumb';
+    img.src = applyFilter(prev, f).toDataURL('image/jpeg', 0.75);
+    const label = document.createElement('span');
+    label.className = 'editor-filter-label';
+    label.textContent = FILTER_LABELS[f];
+    btn.append(img, label);
+    bar.appendChild(btn);
+  });
+}
+
+function capturePreviewPickFilter(f) {
+  if (!pendingCapture) return;
+  pendingCapture.filter = f;
+  document.getElementById('capture-preview-img').src =
+    applyFilter(pendingCapture.warped, f).toDataURL('image/jpeg', 0.85);
+  document.querySelectorAll('#capture-filter-bar .editor-filter-opt').forEach((btn, i) => {
+    btn.classList.toggle('active', FILTERS[i] === f);
+  });
+}
+
+function confirmCapture() {
+  if (!pendingCapture) return;
+  const { warped, srcData, filter } = pendingCapture;
+  pendingCapture = null;
+  document.getElementById('capture-preview').classList.remove('show');
+  addPage(applyFilter(warped, filter), warped, srcData, filter);
+}
+
+function discardCapture() {
+  if (!pendingCapture) return;
+  if (pendingCapture.srcData && pendingCapture.srcData.blobUrl) {
+    URL.revokeObjectURL(pendingCapture.srcData.blobUrl);
+  }
+  pendingCapture = null;
+  document.getElementById('capture-preview').classList.remove('show');
 }
 
 function renderThumbs() {
