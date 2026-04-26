@@ -1430,60 +1430,20 @@ async function captureDocument(corners, pw, ph, vw, vh) {
   stableFrames = 0;
   flashEffect();
   addScanLine();
+  try {
+    // Scale corners from process space to capture space
+    const capW = Math.min(CAPTURE_MAX_W, vw);
+    const capH = Math.round(capW * vh / vw);
+    const sf = capW / pw;
+    let scaledCorners = corners.map(([x, y]) => [x * sf, y * sf]);
 
-  // Scale corners from process space to capture space
-  const capW = Math.min(CAPTURE_MAX_W, vw);
-  const capH = Math.round(capW * vh / vw);
-  const sf = capW / pw;
-  let scaledCorners = corners.map(([x, y]) => [x * sf, y * sf]);
+    // Draw video at capture resolution
+    const srcCanvas = document.createElement('canvas');
+    srcCanvas.width  = capW;
+    srcCanvas.height = capH;
+    srcCanvas.getContext('2d').drawImage(video, 0, 0, capW, capH);
 
-  // Draw video at capture resolution
-  const srcCanvas = document.createElement('canvas');
-  srcCanvas.width  = capW;
-  srcCanvas.height = capH;
-  srcCanvas.getContext('2d').drawImage(video, 0, 0, capW, capH);
-
-  // Prefer OpenCV corners if they cover a larger area
-  if (cvReady && lastCvCorners) {
-    const cvScaled = lastCvCorners.corners.map(([x, y]) => [
-      x * capW / lastCvCorners.pw, y * capH / lastCvCorners.ph
-    ]);
-    if (isValidQuad(cvScaled, capW, capH) && quadArea(cvScaled) > quadArea(scaledCorners) * 1.05)
-      scaledCorners = cvScaled;
-  }
-
-  const { outW, outH } = computeOutputSize(scaledCorners, capW, capH);
-  const H      = computeHomography(scaledCorners, [[0,0],[outW,0],[outW,outH],[0,outH]]);
-  const warped = await warpPerspectiveAsync(srcCanvas, H, outW, outH);
-
-  // Convert srcCanvas to blob URL to free ~34MB of pixel memory
-  const srcBlob = await new Promise(r => srcCanvas.toBlob(r, 'image/jpeg', 0.92));
-  const srcUrl  = URL.createObjectURL(srcBlob);
-  showCapturePreview(warped, { blobUrl: srcUrl, corners: scaledCorners, w: capW, h: capH });
-
-  setStatus('captured');
-  setTimeout(() => setStatus('searching'), 1200);
-  isCapturing = false;
-}
-
-async function manualCapture() {
-  if (isCapturing) return;
-  isCapturing = true;
-  flashEffect();
-
-  const vw = video.videoWidth;
-  const vh = video.videoHeight;
-  const capW = Math.min(CAPTURE_MAX_W, vw);
-  const capH = Math.round(capW * vh / vw);
-
-  const srcCanvas = document.createElement('canvas');
-  srcCanvas.width  = capW;
-  srcCanvas.height = capH;
-  srcCanvas.getContext('2d').drawImage(video, 0, 0, capW, capH);
-
-  if (lastCorners) {
-    const sf = capW / PROCESS_W;
-    let scaledCorners = lastCorners.map(([x, y]) => [x * sf, y * sf]);
+    // Prefer OpenCV corners if they cover a larger area
     if (cvReady && lastCvCorners) {
       const cvScaled = lastCvCorners.corners.map(([x, y]) => [
         x * capW / lastCvCorners.pw, y * capH / lastCvCorners.ph
@@ -1491,17 +1451,60 @@ async function manualCapture() {
       if (isValidQuad(cvScaled, capW, capH) && quadArea(cvScaled) > quadArea(scaledCorners) * 1.05)
         scaledCorners = cvScaled;
     }
+
     const { outW, outH } = computeOutputSize(scaledCorners, capW, capH);
     const H      = computeHomography(scaledCorners, [[0,0],[outW,0],[outW,outH],[0,outH]]);
     const warped = await warpPerspectiveAsync(srcCanvas, H, outW, outH);
+
+    // Convert srcCanvas to blob URL to free ~34MB of pixel memory
     const srcBlob = await new Promise(r => srcCanvas.toBlob(r, 'image/jpeg', 0.92));
     const srcUrl  = URL.createObjectURL(srcBlob);
     showCapturePreview(warped, { blobUrl: srcUrl, corners: scaledCorners, w: capW, h: capH });
-  } else {
-    showCapturePreview(srcCanvas, null);
-  }
 
-  isCapturing = false;
+    setStatus('captured');
+    setTimeout(() => setStatus('searching'), 1200);
+  } finally {
+    isCapturing = false;
+  }
+}
+
+async function manualCapture() {
+  if (isCapturing) return;
+  isCapturing = true;
+  flashEffect();
+  try {
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    const capW = Math.min(CAPTURE_MAX_W, vw);
+    const capH = Math.round(capW * vh / vw);
+
+    const srcCanvas = document.createElement('canvas');
+    srcCanvas.width  = capW;
+    srcCanvas.height = capH;
+    srcCanvas.getContext('2d').drawImage(video, 0, 0, capW, capH);
+
+    if (lastCorners) {
+      const sf = capW / PROCESS_W;
+      let scaledCorners = lastCorners.map(([x, y]) => [x * sf, y * sf]);
+      if (cvReady && lastCvCorners) {
+        const cvScaled = lastCvCorners.corners.map(([x, y]) => [
+          x * capW / lastCvCorners.pw, y * capH / lastCvCorners.ph
+        ]);
+        if (isValidQuad(cvScaled, capW, capH) && quadArea(cvScaled) > quadArea(scaledCorners) * 1.05)
+          scaledCorners = cvScaled;
+      }
+      const { outW, outH } = computeOutputSize(scaledCorners, capW, capH);
+      const H      = computeHomography(scaledCorners, [[0,0],[outW,0],[outW,outH],[0,outH]]);
+      const warped = await warpPerspectiveAsync(srcCanvas, H, outW, outH);
+      const srcBlob = await new Promise(r => srcCanvas.toBlob(r, 'image/jpeg', 0.92));
+      const srcUrl  = URL.createObjectURL(srcBlob);
+      showCapturePreview(warped, { blobUrl: srcUrl, corners: scaledCorners, w: capW, h: capH });
+    } else {
+      showCapturePreview(srcCanvas, null);
+    }
+  } finally {
+    isCapturing = false;
+  }
 }
 
 // ============================================================
@@ -1602,9 +1605,10 @@ async function warpPerspectiveAsync(srcCanvas, H, outW, outH) {
   const sd = new Uint8Array(srcData.data.buffer.slice(0));
 
   _ensureWarpWorker();
-  return new Promise(resolve => {
+  return new Promise((resolve, reject) => {
     const handler = e => {
       warpWorker.removeEventListener('message', handler);
+      warpWorker.removeEventListener('error', errHandler);
       const { od, outW: w, outH: h } = e.data;
       const ctx = out.getContext('2d');
       const img = ctx.createImageData(w, h);
@@ -1612,7 +1616,16 @@ async function warpPerspectiveAsync(srcCanvas, H, outW, outH) {
       ctx.putImageData(img, 0, 0);
       resolve(out);
     };
+    const errHandler = () => {
+      warpWorker.removeEventListener('message', handler);
+      warpWorker.removeEventListener('error', errHandler);
+      warpWorker = null; // force recreate next call
+      // fallback: draw srcCanvas as-is
+      out.getContext('2d').drawImage(srcCanvas, 0, 0, outW, outH);
+      resolve(out);
+    };
     warpWorker.addEventListener('message', handler);
+    warpWorker.addEventListener('error', errHandler);
     warpWorker.postMessage(
       { sd, sw: srcCanvas.width, sh: srcCanvas.height, hinv, outW, outH },
       [sd.buffer, hinv.buffer]
