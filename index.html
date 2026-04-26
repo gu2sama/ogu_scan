@@ -1190,6 +1190,11 @@ function findDocQuadFromLines(lines, w, h) {
               if (!p1 || !p2 || !p3 || !p4) continue;
               if ([p1,p2,p3,p4].some(([x,y]) =>
                 x < -margin || x > w+margin || y < -margin || y > h+margin)) continue;
+              // Hard-reject corners on or near the frame boundary — they indicate
+              // background edges (table edge, frame itself) not document corners.
+              const innerMargin = Math.max(2, Math.min(w, h) * 0.02);
+              if ([p1,p2,p3,p4].some(([x,y]) =>
+                x < innerMargin || x > w-innerMargin || y < innerMargin || y > h-innerMargin)) continue;
               const q = orderQuadCorners([p1, p2, p3, p4]);
               if (isValidQuad(q, w, h)) {
                 const ar = 0.5 * Math.abs(
@@ -1294,6 +1299,12 @@ function detectDocBrightness(data, w, h) {
   if (brightRatio < 0.05 || brightRatio > 0.92) return { detected: false };
   if (relArea     < 0.08 || relArea     > 0.98) return { detected: false };
   if (regionW < 5 || regionH < 5)               return { detected: false };
+
+  // Fill rate: bright pixels ÷ bounding-box area.
+  // A low value means two disconnected bright regions (e.g. white paper + light-coloured
+  // table surface) are being treated as one document — reject in that case.
+  const fillRate = brightCount / (regionW * regionH);
+  if (fillRate < 0.38) return { detected: false };
 
   // Shrink bounding box by 1px to exclude boundary noise before finding corners
   const pad = 1;
