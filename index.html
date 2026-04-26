@@ -1824,18 +1824,31 @@ function applyFilter(canvas, filter) {
     return sharpenCanvas(out, 0.45);
   }
 
-  // bw: per-channel bg division → luminance → binary threshold
+  // bw: luminance bg-division + percentile stretch + extreme S-curve → near-binary
   if (filter === 'bw') {
-    for (let i = 0; i < s.length; i += 4) {
-      const rn = s[i]   / Math.max(1, bg[i])   * 240;
-      const gn = s[i+1] / Math.max(1, bg[i+1]) * 240;
-      const bn = s[i+2] / Math.max(1, bg[i+2]) * 240;
-      const lum = (rn * 77 + gn * 150 + bn * 29) >> 8;
-      s[i] = s[i+1] = s[i+2] = lum < 185 ? 0 : 255;
+    const bwNorm = new Uint8ClampedArray(pixels);
+    const bwHist = new Int32Array(256);
+    for (let i = 0, p = 0; i < s.length; i += 4, p++) {
+      const lum   = (s[i]*77 + s[i+1]*150 + s[i+2]*29) >> 8;
+      const bgLum = Math.max(1, (bg[i]*77 + bg[i+1]*150 + bg[i+2]*29) >> 8);
+      bwNorm[p] = Math.min(255, (lum / bgLum * 240) | 0);
+      bwHist[bwNorm[p]]++;
+    }
+    let bwLo = 0, bwHi = 255, bwCumul = 0;
+    for (let v = 0; v < 256; v++) {
+      bwCumul += bwHist[v];
+      if (bwCumul < pixels * 0.02) bwLo = v;
+      if (bwCumul < pixels * 0.97) bwHi = v;
+    }
+    const bwRange = Math.max(1, bwHi - bwLo);
+    for (let i = 0, p = 0; i < s.length; i += 4, p++) {
+      let t = Math.min(1, Math.max(0, (bwNorm[p] - bwLo) / bwRange));
+      t = Math.min(1, Math.max(0, 0.5 + (t - 0.5) * 5.0));
+      s[i] = s[i+1] = s[i+2] = (t * 255 + 0.5) | 0;
       s[i+3] = 255;
     }
     ctx.putImageData(srcImg, 0, 0);
-    return out;
+    return sharpenCanvas(out, 0.5);
   }
 
   // document / enhance: luminance bg-division + percentile stretch + S-curve
@@ -2081,14 +2094,16 @@ async function doShare() {
   for (let i = 0; i < pages.length; i++) {
     const c   = pages[i];
     const isL = c.width > c.height;
-    const w   = c.width, h = c.height;
     const img = c.toDataURL('image/jpeg', 0.85);
+    // A4 in mm — consistent page size regardless of capture distance
+    const pw = isL ? 297 : 210;
+    const ph = isL ? 210 : 297;
     if (!doc) {
-      doc = new jsPDF({ orientation: isL ? 'l' : 'p', unit: 'px', format: [w, h] });
+      doc = new jsPDF({ orientation: isL ? 'l' : 'p', unit: 'mm', format: 'a4' });
     } else {
-      doc.addPage([w, h], isL ? 'l' : 'p');
+      doc.addPage('a4', isL ? 'l' : 'p');
     }
-    doc.addImage(img, 'JPEG', 0, 0, w, h);
+    doc.addImage(img, 'JPEG', 0, 0, pw, ph);
   }
 
   const now = new Date();
